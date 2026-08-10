@@ -1,0 +1,1 @@
+"""File integrity verification (hashing)."""

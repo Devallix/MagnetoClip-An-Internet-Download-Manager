@@ -1,0 +1,14 @@
+PySide6==6.11.1
+httpx==0.28.1
+SQLAlchemy==2.0.51
+qasync==0.28.0
+keyring==25.7.0
+structlog==26.1.0
+aiofiles==25.1.0
+yt-dlp==2026.07.04
+cryptography==50.0.0
+
+# Dev / test
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-qt==4.5.0

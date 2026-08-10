@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "magnetoclip"
+version = "0.1.0"
+description = "Advanced Download Manager — Capture the Web."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+dependencies = [
+    "PySide6>=6.8",
+    "httpx>=0.28",
+    "SQLAlchemy>=2.0",
+    "qasync>=0.28",
+    "keyring>=25",
+    "structlog>=26",
+    "aiofiles>=25",
+    "yt-dlp>=2026.7",
+    "cryptography>=46",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9",
+    "pytest-asyncio>=1",
+    "pytest-qt>=4.4",
+]
+
+[project.scripts]
+magnetoclip = "magnetoclip.app.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+asyncio_mode = "auto"
+pythonpath = ["src"]
+qt_api = "pyside6"
