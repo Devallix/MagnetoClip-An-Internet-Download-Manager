@@ -2,6 +2,7 @@ const HOST_NAME = "com.magnetoclip.host";
 
 const pendingFilenames = new Map();
 const pendingResponses = new Map();
+const tabDetections = new Map();
 let nativePort = null;
 let nextId = 1;
 let integrationEnabled = true;
@@ -87,7 +88,7 @@ function guessFilename(url) {
 function notify(title, message) {
   chrome.notifications.create({
     type: "basic",
-    iconUrl: "icons/download.png",
+    iconUrl: "icons/logo-128.png",
     title: title,
     message: message
   });
@@ -103,6 +104,10 @@ function ensureMenus() {
 
 chrome.runtime.onInstalled.addListener(ensureMenus);
 chrome.runtime.onStartup.addListener(ensureMenus);
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  tabDetections.delete(tabId);
+});
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   const url = info.linkUrl || info.srcUrl || "";
@@ -169,7 +174,7 @@ chrome.downloads.onCreated.addListener((item) => {
   });
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message && message.type === "ping") {
     sendResponse({ type: "pong" });
     return;
@@ -179,6 +184,51 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({ type: "error", message: error.message });
     });
     return true;
+  }
+  if (message && message.type === "detection_update") {
+    if (sender.tab) {
+      tabDetections.set(sender.tab.id, {
+        url: message.url || "",
+        title: message.title || "",
+        files: Array.isArray(message.files) ? message.files : [],
+        ts: Date.now()
+      });
+    }
+    return;
+  }
+  if (message && message.type === "detected_files") {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const tab = tabs && tabs[0];
+      const data = tab ? tabDetections.get(tab.id) : null;
+      sendResponse({
+        type: "detected_files_ok",
+        url: data ? data.url : "",
+        title: data ? data.title : "",
+        files: data ? data.files : []
+      });
+    });
+    return true;
+  }
+  if (message && message.type === "download_file") {
+    request("capture", {
+      url: message.url,
+      filename: message.filename || "",
+      referrer: message.referrer || "",
+      source: "popup",
+      detected_type: message.detected_type || "file"
+    })
+      .then((response) => {
+        if (response.type === "capture_pending") {
+          notify(
+            "MagnetoClip — ready to download",
+            (response.filename || message.url) + " is waiting for your confirmation in MagnetoClip."
+          );
+        }
+      })
+      .catch((error) => {
+        notify("MagnetoClip unavailable", error.message);
+      });
+    return;
   }
   if (message && message.type === "page_scan") {
     request("page_scan", { url: message.url, files: message.files }).catch(() => {});

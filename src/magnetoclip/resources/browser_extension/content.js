@@ -1,10 +1,14 @@
 // content.js — scans pages for downloadable files and media.
 //
-// On social platforms (Twitter/X, Facebook, Instagram, Telegram, Snapchat) the
-// scanner watches media elements, network resources and dynamic DOM changes and
-// sends every newly detected video/audio/image to MagnetoClip so it can present
-// a capture popup. On every other page it keeps reporting the files it finds as
-// a plain page scan.
+// On every page the scanner watches media elements, network resources and
+// dynamic DOM changes. On social platforms (Twitter/X, Facebook, Instagram,
+// Telegram, Snapchat) it sends every newly detected video/audio/image to
+// MagnetoClip so it can present a capture popup. On streaming platforms that
+// yt-dlp can resolve (YouTube, Vimeo, Twitch, TikTok, ...) it sends the page
+// URL as soon as a video starts playing so MagnetoClip can grab it. On every
+// other page it keeps reporting the files it finds as a plain page scan. The
+// latest detection results are always reported to the background page so the
+// extension popup can show them.
 (() => {
   "use strict";
 
@@ -45,12 +49,18 @@
     "snapchat.com",
   ]);
 
-  // Hosts where MagnetoClip can resolve a whole post URL to media (via yt-dlp),
-  // used as a fallback when the real media URL is hidden behind blob: streams.
+  // Hosts where MagnetoClip can resolve a whole page/post URL to media (via
+  // yt-dlp), used when the real media is hidden behind blob:/MSE streams.
   const YTDLP_HOSTS = new Set([
     "twitter.com", "x.com",
     "facebook.com", "fb.watch",
     "instagram.com",
+    "youtube.com", "youtu.be",
+    "vimeo.com",
+    "twitch.tv",
+    "tiktok.com",
+    "dailymotion.com",
+    "reddit.com",
   ]);
 
   // HLS/DASH transport files that are useless to download on their own.
@@ -313,9 +323,8 @@
     for (const capture of captures) {
       if (capture.url === location.href) {
         reportedPageHosts.add(pageHost);
-      } else {
-        reportedUrls.add(capture.url);
       }
+      reportedUrls.add(capture.url);
     }
     chrome.runtime.sendMessage({
       type: "social_capture",
@@ -324,7 +333,27 @@
     });
   }
 
-  function reportPageScan(direct) {
+  // A page capture for streaming platforms MagnetoClip can resolve with yt-dlp.
+  // As soon as a video/audio element is actually playing (or a blob:/HLS stream
+  // is present), the page URL is offered so MagnetoClip extracts the real media.
+  function buildYtdlpCaptures(manifests, blobDetected) {
+    const pageHost = hostOf(location.href);
+    if (!isOnYtdlpHost(pageHost) || reportedUrls.has(location.href)) {
+      return [];
+    }
+    const anyPlaying = Array.from(
+      document.querySelectorAll("video, audio")
+    ).some((element) => !element.paused);
+    if (!anyPlaying && !blobDetected.value && manifests.size === 0) {
+      return [];
+    }
+    return [pageEntry()];
+  }
+
+  function reportPageScan(direct, enabled) {
+    if (!enabled) {
+      return;
+    }
     const files = [];
     const seen = new Set();
     for (const [url, type] of direct) {
@@ -350,30 +379,86 @@
     });
   }
 
+  let lastDetectionReport = "";
+
+  function reportDetectionUpdate(direct, manifests) {
+    const files = [];
+    const seen = new Set();
+    for (const [url, type] of direct) {
+      if (seen.has(url)) {
+        continue;
+      }
+      seen.add(url);
+      files.push(directEntry(url, type));
+      if (files.length >= MAX_PAGE_SCAN_FILES) {
+        break;
+      }
+    }
+    for (const url of manifests) {
+      if (seen.has(url) || files.length >= MAX_PAGE_SCAN_FILES) {
+        continue;
+      }
+      seen.add(url);
+      files.push({ url: url, filename: filenameOf(url), detected_type: "stream" });
+    }
+    prependPageCapture(files);
+    const snapshot = JSON.stringify({
+      url: location.href,
+      title: pageTitle(),
+      files: files,
+    });
+    if (snapshot === lastDetectionReport) {
+      return;
+    }
+    lastDetectionReport = snapshot;
+    chrome.runtime.sendMessage({
+      type: "detection_update",
+      url: location.href,
+      title: pageTitle(),
+      files: files,
+    });
+  }
+
+  // A page capture was just sent for a resolvable streaming page; surface it as
+  // a detected video even though the real source is a hidden blob:/MSE stream.
+  function prependPageCapture(files) {
+    const pageHost = hostOf(location.href);
+    if (isOnYtdlpHost(pageHost) && reportedUrls.has(location.href)) {
+      files.unshift({
+        url: location.href,
+        filename: pageTitle(),
+        detected_type: "video",
+      });
+    }
+    return files;
+  }
+
   function scan() {
     const direct = new Map();
     const manifests = new Set();
     const blobDetected = { value: false };
 
     scanAnchors(direct, manifests);
-    if (social) {
-      scanMediaElements(direct, manifests, blobDetected);
-      scanImages(direct);
-      scanPerformanceResources(direct, manifests);
-    }
+    scanMediaElements(direct, manifests, blobDetected);
+    scanImages(direct);
+    scanPerformanceResources(direct, manifests);
 
+    const pageHost = hostOf(location.href);
     if (social) {
       reportCaptures(buildCaptures(direct, manifests, blobDetected));
     } else {
-      reportPageScan(direct);
+      reportCaptures(buildYtdlpCaptures(manifests, blobDetected));
     }
+    reportPageScan(direct, !social && !isOnYtdlpHost(pageHost));
+    reportDetectionUpdate(direct, manifests);
   }
 
-  // ----- watching dynamic content (social SPAs) -----
+  // ----- watching dynamic content -----
 
   function resetSession() {
     reportedUrls.clear();
     reportedPageHosts.clear();
+    lastDetectionReport = "";
   }
 
   function scheduleScan() {
@@ -393,6 +478,10 @@
       subtree: true,
     });
     setInterval(scan, 6000);
+
+    // Fire a scan the instant a video starts playing so YouTube & co. are
+    // offered without waiting for the next polling tick.
+    document.addEventListener("playing", scheduleScan, true);
 
     const wrap = (method) => {
       const original = history[method];
@@ -416,9 +505,7 @@
   social = isOnSocialHost(hostOf(location.href));
 
   function start() {
-    if (social) {
-      startWatching();
-    }
+    startWatching();
     scan();
   }
 

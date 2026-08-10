@@ -14,6 +14,11 @@ from magnetoclip.services.logging import get_logger
 
 log = get_logger(__name__)
 
+if os.name == "nt":  # pragma: no cover - exercised on Windows
+    import winreg
+else:
+    winreg = None
+
 HOST_NAME = "com.magnetoclip.host"
 _EXTENSION_ALPHABET = "abcdefghijklmnop"
 
@@ -99,6 +104,36 @@ def _browser_native_dir(browser: str) -> str:
     return "Google\\Chrome\\NativeMessagingHosts"
 
 
+def _native_hosts_registry_key(browser: str) -> str | None:
+    """HKCU registry path where a browser looks up native host manifests.
+
+    Returns ``None`` for browsers using file-based discovery (Firefox).
+    """
+    if browser in ("firefox",):
+        return None
+    return f"Software\\{_browser_native_dir(browser)}"
+
+
+def _register_native_host(browser: str, manifest_path: Path) -> None:
+    key = _native_hosts_registry_key(browser)
+    if key is None or winreg is None:
+        return
+    full_key = f"{key}\\{HOST_NAME}"
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, full_key) as hkey:
+        winreg.SetValue(hkey, "", winreg.REG_SZ, str(manifest_path))
+
+
+def _unregister_native_host(browser: str) -> None:
+    key = _native_hosts_registry_key(browser)
+    if key is None or winreg is None:
+        return
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_SET_VALUE) as parent:
+            winreg.DeleteKey(parent, HOST_NAME)
+    except OSError:
+        pass
+
+
 def build_host_manifest(
     host_path: Path, extension_id: str, browser: str, data_dir: Path
 ) -> dict:
@@ -143,8 +178,9 @@ def install(
     for browser in browsers:
         try:
             path = write_host_manifest(browser, host_path, extension_id, data_dir)
+            _register_native_host(browser, path)
             results[browser] = f"registered at {path}"
-        except Exception as exc:  # noqa: BLE001 - report per-browser failures
+        except Exception as exc:
             log.exception("host_install_failed", browser=browser)
             results[browser] = f"failed: {exc}"
     return results
@@ -155,6 +191,7 @@ def uninstall(browsers: list[str], data_dir: Path) -> dict[str, str]:
     for browser in browsers:
         try:
             path = host_manifest_path(browser, data_dir)
+            _unregister_native_host(browser)
             if path.exists():
                 path.unlink()
                 results[browser] = "removed"

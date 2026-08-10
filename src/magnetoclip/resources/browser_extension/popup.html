@@ -3,30 +3,380 @@
   <head>
     <meta charset="utf-8" />
     <style>
+      :root {
+        --bg: #0b0d14;
+        --surface: #131624;
+        --surface-alt: #1a1e31;
+        --border: #262b44;
+        --text: #e6e9f5;
+        --text-muted: #8a92b5;
+        --accent: #8b5cf6;
+        --accent-cyan: #22d3ee;
+        --success: #34d399;
+        --warning: #fbbf24;
+        --danger: #f87171;
+      }
+
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
       body {
-        font-family: system-ui, sans-serif;
-        width: 260px;
-        padding: 12px;
+        width: 300px;
+        background: var(--bg);
+        color: var(--text);
+        font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+        font-size: 13px;
+        user-select: none;
       }
-      h1 {
+
+      .card {
+        padding: 14px;
+      }
+
+      header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 14px;
+        background: linear-gradient(135deg, var(--surface) 0%, var(--surface-alt) 100%);
+        border-bottom: 1px solid var(--border);
+      }
+
+      header img {
+        width: 40px;
+        height: 40px;
+        border-radius: 10px;
+      }
+
+      .brand {
+        display: flex;
+        flex-direction: column;
+        line-height: 1.2;
+      }
+
+      .brand-title {
         font-size: 14px;
-        margin: 0 0 8px;
+        font-weight: 700;
+        letter-spacing: 0.2px;
       }
-      #status {
-        font-size: 12px;
-        color: #555;
+
+      .brand-sub {
+        font-size: 11px;
+        color: var(--text-muted);
       }
-      #integration {
+
+      .status {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 14px;
         font-size: 12px;
-        color: #2e7d32;
-        margin-top: 4px;
+      }
+
+      .dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: var(--warning);
+        flex-shrink: 0;
+        animation: pulse 1.2s ease-in-out infinite;
+      }
+
+      .dot.online {
+        background: var(--success);
+        animation: none;
+      }
+
+      .dot.offline {
+        background: var(--danger);
+        animation: none;
+      }
+
+      .status-text {
+        color: var(--text-muted);
+      }
+
+      .status-text strong {
+        color: var(--text);
+        font-weight: 600;
+      }
+
+      .stats {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        padding: 4px 14px 14px;
+      }
+
+      .stat {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 12px;
+        text-align: center;
+      }
+
+      .stat-value {
+        font-size: 22px;
+        font-weight: 700;
+        line-height: 1.2;
+      }
+
+      .stat.active .stat-value {
+        color: var(--accent-cyan);
+      }
+
+      .stat.completed .stat-value {
+        color: var(--success);
+      }
+
+      .stat-label {
+        font-size: 11px;
+        color: var(--text-muted);
+        margin-top: 2px;
+      }
+
+      .badges {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 0 14px 14px;
+      }
+
+      .badge {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 9px 12px;
+        font-size: 12px;
+      }
+
+      .badge-label {
+        color: var(--text-muted);
+      }
+
+      .badge-pill {
+        padding: 3px 10px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 600;
+        background: var(--danger);
+        color: #fff;
+      }
+
+      .badge-pill.enabled {
+        background: rgba(52, 211, 153, 0.15);
+        color: var(--success);
+      }
+
+      .error {
+        margin: 0 14px 14px;
+        padding: 10px 12px;
+        border: 1px solid rgba(248, 113, 113, 0.35);
+        background: rgba(248, 113, 113, 0.08);
+        color: var(--danger);
+        border-radius: 10px;
+        font-size: 12px;
+        line-height: 1.4;
+        display: none;
+      }
+
+      .section-title {
+        padding: 0 14px 8px;
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
+        color: var(--text-muted);
+      }
+
+      #detected-list {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 0 14px 14px;
+        max-height: 168px;
+        overflow-y: auto;
+      }
+
+      .detected-item {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 8px 10px;
+      }
+
+      .detected-type {
+        flex-shrink: 0;
+        width: 26px;
+        height: 26px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 8px;
+        font-size: 13px;
+        background: var(--surface-alt);
+      }
+
+      .detected-type.video { color: var(--accent-cyan); }
+      .detected-type.audio { color: var(--success); }
+      .detected-type.image { color: var(--warning); }
+      .detected-type.stream { color: var(--accent); }
+
+      .detected-info {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .detected-name {
+        font-size: 12px;
+        color: var(--text);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .detected-url {
+        font-size: 10px;
+        color: var(--text-muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .detected-btn {
+        flex-shrink: 0;
+        padding: 5px 10px;
+        border-radius: 8px;
+        font-size: 11px;
+        background: var(--accent);
+        border: 1px solid var(--accent);
+        color: #fff;
+        cursor: pointer;
+      }
+
+      .detected-btn:hover {
+        background: #7c3aed;
+      }
+
+      .detected-btn.sent {
+        background: rgba(52, 211, 153, 0.15);
+        border-color: rgba(52, 211, 153, 0.4);
+        color: var(--success);
+        cursor: default;
+      }
+
+      #detected-empty {
+        margin: 0 14px 14px;
+        padding: 14px;
+        border: 1px dashed var(--border);
+        border-radius: 10px;
+        color: var(--text-muted);
+        font-size: 12px;
+        text-align: center;
+      }
+
+      footer {
+        display: flex;
+        gap: 8px;
+        padding: 0 14px 14px;
+      }
+
+      button {
+        flex: 1;
+        background: var(--surface-alt);
+        border: 1px solid var(--border);
+        color: var(--text);
+        border-radius: 10px;
+        padding: 8px 0;
+        font-size: 12px;
+        font-weight: 600;
+        font-family: inherit;
+        cursor: pointer;
+        transition: background 0.15s ease, border-color 0.15s ease;
+      }
+
+      button:hover {
+        background: var(--border);
+      }
+
+      button.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+      }
+
+      button.primary:hover {
+        background: #7c3aed;
+      }
+
+      .hidden {
+        display: none !important;
+      }
+
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.35; }
       }
     </style>
   </head>
   <body>
-    <h1>MagnetoClip Companion</h1>
-    <p id="status">Checking…</p>
-    <p id="integration">Checking…</p>
+    <header>
+      <img src="icons/logo-48.png" alt="MagnetoClip" />
+      <div class="brand">
+        <span class="brand-title">MagnetoClip Companion</span>
+        <span class="brand-sub">Browser bridge</span>
+      </div>
+    </header>
+
+    <div class="status">
+      <span class="dot" id="status-dot"></span>
+      <span class="status-text" id="status-text">Checking connection…</span>
+    </div>
+
+    <div class="stats">
+      <div class="stat active">
+        <div class="stat-value" id="stat-active">–</div>
+        <div class="stat-label">Active downloads</div>
+      </div>
+      <div class="stat completed">
+        <div class="stat-value" id="stat-completed">–</div>
+        <div class="stat-label">Completed</div>
+      </div>
+    </div>
+
+    <div class="badges">
+      <div class="badge">
+        <span class="badge-label">Integration</span>
+        <span class="badge-pill" id="badge-integration">Unknown</span>
+      </div>
+      <div class="badge">
+        <span class="badge-label">Capture</span>
+        <span class="badge-pill" id="badge-capture">Unknown</span>
+      </div>
+    </div>
+
+    <div class="section-title">Detected on this page</div>
+    <div id="detected-list"></div>
+    <div id="detected-empty">No downloadable files detected on this page yet.</div>
+
+    <div class="error" id="error-box">
+      <span id="error-text"></span>
+    </div>
+
+    <footer>
+      <button class="primary" id="btn-retry">Refresh status</button>
+    </footer>
+
     <script src="popup.js"></script>
   </body>
 </html>

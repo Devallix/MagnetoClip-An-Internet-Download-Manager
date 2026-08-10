@@ -299,3 +299,107 @@ def test_host_manifest_path_per_browser(tmp_path, monkeypatch):
     assert str(firefox).endswith(
         "Roaming\\Mozilla\\NativeMessagingHosts\\com.magnetoclip.host.json"
     )
+
+
+def test_native_hosts_registry_key_per_browser():
+    import importlib
+
+    install_mod = importlib.import_module("magnetoclip.browser.integration.install")
+
+    assert (
+        install_mod._native_hosts_registry_key("chrome")
+        == "Software\\Google\\Chrome\\NativeMessagingHosts"
+    )
+    assert (
+        install_mod._native_hosts_registry_key("edge")
+        == "Software\\Microsoft\\Edge\\NativeMessagingHosts"
+    )
+    assert (
+        install_mod._native_hosts_registry_key("chromium")
+        == "Software\\Chromium\\NativeMessagingHosts"
+    )
+    assert (
+        install_mod._native_hosts_registry_key("brave")
+        == "Software\\BraveSoftware\\Brave-Browser\\NativeMessagingHosts"
+    )
+    assert (
+        install_mod._native_hosts_registry_key("vivaldi")
+        == "Software\\Vivaldi\\NativeMessagingHosts"
+    )
+    assert install_mod._native_hosts_registry_key("firefox") is None
+
+
+def test_register_and_unregister_native_host(monkeypatch, tmp_path):
+    import importlib
+
+    install_mod = importlib.import_module("magnetoclip.browser.integration.install")
+
+    created: list[tuple[str, str]] = []
+    values: list[tuple[str, str, str, str]] = []
+    deleted: list[tuple[str, str]] = []
+
+    class FakeKey:
+        def __init__(self, name):
+            self.name = name
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class FakeWinreg:
+        HKEY_CURRENT_USER = "HKCU"
+        REG_SZ = "REG_SZ"
+        KEY_SET_VALUE = 0x0002
+
+        @staticmethod
+        def CreateKey(hive, key):
+            created.append((hive, key))
+            return FakeKey(key)
+
+        @staticmethod
+        def SetValue(key, name, value_type, value):
+            values.append((key.name, name, value_type, value))
+
+        @staticmethod
+        def OpenKey(hive, key, reserved, access):
+            return FakeKey(key)
+
+        @staticmethod
+        def DeleteKey(key, subkey):
+            deleted.append((key.name, subkey))
+
+    monkeypatch.setattr(install_mod, "winreg", FakeWinreg)
+
+    manifest = tmp_path / "com.magnetoclip.host.json"
+    install_mod._register_native_host("chrome", manifest)
+    assert created == [
+        ("HKCU", "Software\\Google\\Chrome\\NativeMessagingHosts\\com.magnetoclip.host")
+    ]
+    assert values == [
+        (
+            "Software\\Google\\Chrome\\NativeMessagingHosts\\com.magnetoclip.host",
+            "",
+            "REG_SZ",
+            str(manifest),
+        )
+    ]
+
+    install_mod._register_native_host("firefox", manifest)
+    assert len(created) == 1
+
+    install_mod._unregister_native_host("chrome")
+    assert deleted == [
+        ("Software\\Google\\Chrome\\NativeMessagingHosts", "com.magnetoclip.host")
+    ]
+
+
+def test_registry_noop_when_winreg_unavailable(monkeypatch, tmp_path):
+    import importlib
+
+    install_mod = importlib.import_module("magnetoclip.browser.integration.install")
+
+    monkeypatch.setattr(install_mod, "winreg", None)
+    install_mod._register_native_host("chrome", tmp_path / "x.json")
+    install_mod._unregister_native_host("chrome")
