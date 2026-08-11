@@ -115,25 +115,58 @@ class BrowserIntegrationService:
         return extension_id_from_public_key(public_key)
 
     def install_extension(self) -> Path:
-        """Copy the bundled extension to the config dir with the signing key."""
+        """Copy the bundled extension to the config dir with the signing key.
+
+        Files are only written when their content differs from what is already
+        on disk. Rewriting identical files on every launch would bump their
+        mtime, which Chrome treats as an extension update and reloads the
+        unpacked extension, invalidating content scripts in open tabs.
+        """
         target = self.extension_dir()
         target.mkdir(parents=True, exist_ok=True)
         source = resource_path("browser_extension")
         for entry in source.iterdir():
             destination = target / entry.name
             if entry.is_dir():
-                shutil.copytree(entry, destination, dirs_exist_ok=True)
+                self._sync_tree(entry, destination)
             else:
-                shutil.copy2(entry, destination)
+                self._copy_if_changed(entry, destination)
         manifest_path = target / "manifest.json"
         with open(manifest_path, "r", encoding="utf-8") as handle:
             manifest = json.load(handle)
         _key_path, public_key = ensure_extension_key(self.context.data_dir)
         manifest["key"] = public_key_base64(public_key)
-        with open(manifest_path, "w", encoding="utf-8") as handle:
-            json.dump(manifest, handle, indent=2)
+        self._write_if_changed(manifest_path, json.dumps(manifest, indent=2))
         log.info("browser_extension_prepared", path=str(target))
         return target
+
+    @staticmethod
+    def _copy_if_changed(source: Path, destination: Path) -> None:
+        try:
+            if destination.is_file() and destination.read_bytes() == source.read_bytes():
+                return
+        except OSError:
+            pass
+        shutil.copy2(source, destination)
+
+    @classmethod
+    def _sync_tree(cls, source: Path, destination: Path) -> None:
+        destination.mkdir(parents=True, exist_ok=True)
+        for entry in source.iterdir():
+            child = destination / entry.name
+            if entry.is_dir():
+                cls._sync_tree(entry, child)
+            else:
+                cls._copy_if_changed(entry, child)
+
+    @staticmethod
+    def _write_if_changed(path: Path, content: str) -> None:
+        try:
+            if path.is_file() and path.read_text(encoding="utf-8") == content:
+                return
+        except OSError:
+            pass
+        path.write_text(content, encoding="utf-8")
 
     # ----- browser detection -----
 

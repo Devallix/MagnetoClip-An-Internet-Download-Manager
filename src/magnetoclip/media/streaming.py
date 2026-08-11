@@ -75,6 +75,22 @@ def _host_of(url: str) -> str:
         return ""
 
 
+def _is_bot_wall_error(message: str) -> bool:
+    """True when yt-dlp reports an auth/bot-wall block that browser cookies may help with."""
+    lowered = message.lower()
+    return any(
+        token in lowered
+        for token in (
+            "sign in to confirm",
+            "not a bot",
+            "recaptcha",
+            "unusual traffic",
+            "request has been throttled",
+            "too many requests",
+        )
+    )
+
+
 def is_streaming_url(url: str) -> bool:
     """Return True if *url* points to an embedded/streaming media platform."""
     if not url or not isinstance(url, str):
@@ -122,6 +138,41 @@ def _ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
+def _write_cookiefile(url: str, cookies) -> Path | None:
+    """Write ``cookies`` (dict or header string) to a Netscape cookie file.
+
+    yt-dlp loads cookies through its cookie jar, which authenticates
+    browser-gated platforms like YouTube (the "Sign in to confirm you're not
+    a bot" wall). Returns the temp file path or None when there is nothing
+    to write. The caller is responsible for deleting the file.
+    """
+    if not cookies:
+        return None
+    from tempfile import NamedTemporaryFile
+
+    from ..network.cookies.jar import parse_cookie_header
+
+    if isinstance(cookies, str):
+        cookies = parse_cookie_header(cookies)
+    if not cookies:
+        return None
+    host = _host_of(url)
+    secure = url.startswith("https://")
+    lines = ["# Netscape HTTP Cookie File"]
+    for name, value in cookies.items():
+        lines.append(
+            f".{host}\tTRUE\t/\t{'TRUE' if secure else 'FALSE'}\t2147483647\t{name}\t{value}"
+        )
+    handle = NamedTemporaryFile(
+        "w", suffix=".cookies.txt", encoding="utf-8", delete=False
+    )
+    try:
+        handle.write("\n".join(lines))
+    finally:
+        handle.close()
+    return Path(handle.name)
+
+
 def _build_format_selector(quality: str, media_type: str) -> str:
     """Build a yt-dlp -f expression for the requested quality.
 
@@ -146,12 +197,17 @@ def _build_format_selector(quality: str, media_type: str) -> str:
     return sel
 
 
-def resolve_stream(url: str, quality: str = "best", timeout: float = 20.0) -> StreamInfo:
+def resolve_stream(
+    url: str,
+    quality: str = "best",
+    timeout: float = 20.0,
+    cookies=None,
+) -> StreamInfo:
     """Resolve metadata for *url* without downloading. Raises StreamResolutionError."""
     from yt_dlp import YoutubeDL
 
     selector = _build_format_selector(quality, "video")
-    params = {
+    base_params = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
@@ -160,12 +216,37 @@ def resolve_stream(url: str, quality: str = "best", timeout: float = 20.0) -> St
         "nocheckcertificate": True,
         "format": selector,
     }
-    try:
-        with YoutubeDL(params) as ydl:
-            info = ydl.extract_info(url, download=False)
-    except Exception as exc:
-        logger.warning("Failed to resolve stream for %s: %s", url, exc)
-        raise StreamResolutionError(str(exc)) from exc
+    # Try anonymously first: passing browser cookies can trigger a degraded
+    # player response for some sessions. Only retry with cookies when the
+    # anonymous attempt is blocked by an auth/bot wall.
+    info = None
+    for attempt_cookies in ((None,) if not cookies else (None, cookies)):
+        cookiefile = _write_cookiefile(url, attempt_cookies)
+        params = dict(base_params)
+        if cookiefile is not None:
+            params["cookiefile"] = str(cookiefile)
+        try:
+            try:
+                with YoutubeDL(params) as ydl:
+                    info = ydl.extract_info(url, download=False)
+            except Exception as exc:
+                message = str(exc)
+                can_retry = (
+                    attempt_cookies is None
+                    and bool(cookies)
+                    and _is_bot_wall_error(message)
+                )
+                if not can_retry:
+                    logger.warning("Failed to resolve stream for %s: %s", url, message)
+                    raise StreamResolutionError(message) from exc
+                continue
+        finally:
+            if cookiefile is not None:
+                try:
+                    cookiefile.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        break
 
     if not info:
         raise StreamResolutionError("yt-dlp returned no info")
@@ -197,12 +278,14 @@ def download_stream(
     progress_cb=None,
     cancel_event: threading.Event | None = None,
     timeout: float = 20.0,
+    cookies=None,
 ) -> Path:
     """Download *url* into *save_dir*, returning the final file path.
 
     *progress_cb* is invoked with a dict of yt-dlp progress info. If
     *cancel_event* is set at any point the download is aborted and the partial
-    file is removed.
+    file is removed. *cookies* (dict or header string) are written to a
+    temporary Netscape cookie file so browser-authenticated sources resolve.
     """
     from yt_dlp import YoutubeDL
 
@@ -224,7 +307,7 @@ def download_stream(
 
     hooks.append(_progress_hook)
 
-    params = {
+    base_params = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
@@ -239,16 +322,39 @@ def download_stream(
         "progress_hooks": hooks,
     }
     if not _ffmpeg_available():
-        params["merge_output_format"] = None
+        base_params["merge_output_format"] = None
 
-    try:
-        with YoutubeDL(params) as ydl:
-            info = ydl.extract_info(url, download=True)
-    except DownloadCancelled:
-        raise
-    except Exception as exc:
-        logger.warning("Stream download failed for %s: %s", url, exc)
-        raise
+    # Anonymous first, cookies as a bot-wall fallback (see resolve_stream).
+    info = None
+    for attempt_cookies in ((None,) if not cookies else (None, cookies)):
+        cookiefile = _write_cookiefile(url, attempt_cookies)
+        params = dict(base_params)
+        if cookiefile is not None:
+            params["cookiefile"] = str(cookiefile)
+        try:
+            try:
+                with YoutubeDL(params) as ydl:
+                    info = ydl.extract_info(url, download=True)
+            except DownloadCancelled:
+                raise
+            except Exception as exc:
+                message = str(exc)
+                can_retry = (
+                    attempt_cookies is None
+                    and bool(cookies)
+                    and _is_bot_wall_error(message)
+                )
+                if not can_retry:
+                    logger.warning("Stream download failed for %s: %s", url, message)
+                    raise
+                continue
+        finally:
+            if cookiefile is not None:
+                try:
+                    cookiefile.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        break
 
     if not info:
         raise StreamResolutionError("yt-dlp returned no info")

@@ -101,9 +101,11 @@ def _browser_host_main(argv: Sequence[str]) -> int:
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    with loop:
+    try:
         loop.create_task(_host_main())
         loop.run_forever()
+    finally:
+        loop.close()
     log.info("browser_host_stopped")
     return 0
 

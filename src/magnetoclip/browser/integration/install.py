@@ -28,9 +28,9 @@ _CHROMIUM_APP_ID = "MagnetoClip"
 def extension_id_from_public_key(public_key: rsa.RSAPublicKey) -> str:
     """Compute the Chrome extension id from an RSA public key.
 
-    Mirrors Chromium's ``GenerateIdForPath``: hash the SPKI, take the first
-    16 bytes and map each byte to two chars (low nibble first) using the
-    alphabet ``abcdefghijklmnop``.
+    Mirrors Chromium's ``GenerateIdForPath`` for keyed extensions: hash the
+    DER SPKI with SHA-256, take the first 16 bytes and map each byte to two
+    chars (high nibble first) using the alphabet ``abcdefghijklmnop``.
     """
     spki = public_key.public_bytes(
         serialization.Encoding.DER,
@@ -41,8 +41,8 @@ def extension_id_from_public_key(public_key: rsa.RSAPublicKey) -> str:
     first16 = digest.finalize()[:16]
     chars = []
     for byte in first16:
+        chars.append(_EXTENSION_ALPHABET[byte >> 4])
         chars.append(_EXTENSION_ALPHABET[byte & 0x0F])
-        chars.append(_EXTENSION_ALPHABET[(byte >> 4) & 0x0F])
     return "".join(chars)
 
 

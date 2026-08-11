@@ -65,10 +65,21 @@ def _migration_003_browser_tables(engine: Engine) -> None:
     BrowserDetection.__table__.create(engine, checkfirst=True)
 
 
+def _migration_004_pending_capture_cookies(engine: Engine) -> None:
+    """Add cookie storage for browser captures (guarded)."""
+    columns = {column["name"] for column in inspect(engine).get_columns("pending_captures")}
+    with engine.begin() as conn:
+        if "cookies_json" not in columns:
+            conn.execute(
+                text("ALTER TABLE pending_captures ADD COLUMN cookies_json JSON")
+            )
+
+
 MIGRATIONS: list[Migration] = [
     _migration_001_create_all,
     _migration_002_media_columns,
     _migration_003_browser_tables,
+    _migration_004_pending_capture_cookies,
 ]
 
 

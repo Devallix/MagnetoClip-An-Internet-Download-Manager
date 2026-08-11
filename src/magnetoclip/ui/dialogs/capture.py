@@ -21,6 +21,7 @@ from ..components.buttons import AccentButton, GhostButton
 RESULT_DOWNLOAD_NOW = 1
 RESULT_DOWNLOAD_LATER = 2
 RESULT_SKIP = 0
+RESULT_SKIP_ALL = 3
 
 
 class CaptureDialog(QDialog):
@@ -116,6 +117,9 @@ class CaptureDialog(QDialog):
         self.skip_button = GhostButton("Skip")
         self.skip_button.clicked.connect(lambda: self.done(RESULT_SKIP))
         buttons.addWidget(self.skip_button)
+        self.skip_all_button = GhostButton("Skip all")
+        self.skip_all_button.clicked.connect(lambda: self.done(RESULT_SKIP_ALL))
+        buttons.addWidget(self.skip_all_button)
         buttons.addStretch(1)
         self.later_button = GhostButton("Download later")
         self.later_button.clicked.connect(self._download_later)

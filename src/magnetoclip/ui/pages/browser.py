@@ -99,6 +99,13 @@ class BrowserPage(Page):
         self.capture_check.toggled.connect(self._on_capture_toggled)
         layout.addWidget(self.capture_check)
 
+        self.default_downloader_check = QCheckBox(
+            "Make MagnetoClip the default downloader "
+            "(intercept every browser download)"
+        )
+        self.default_downloader_check.toggled.connect(self._on_default_downloader_toggled)
+        layout.addWidget(self.default_downloader_check)
+
         layout.addWidget(self._build_browsers_card())
         layout.addWidget(self._build_extension_card())
         layout.addWidget(self._build_setup_card())
@@ -232,6 +239,11 @@ class BrowserPage(Page):
         self._persist()
         self.refresh()
 
+    def _on_default_downloader_toggled(self, checked: bool) -> None:
+        self.context.settings.set("browser.default_downloader", checked)
+        self._persist()
+        self.refresh()
+
     def _activate(self) -> None:
         try:
             results = self.context.browser.ensure_installed()
@@ -300,6 +312,11 @@ class BrowserPage(Page):
             bool(self.context.settings.get("browser.capture_enabled", True))
         )
         self.capture_check.blockSignals(False)
+        self.default_downloader_check.blockSignals(True)
+        self.default_downloader_check.setChecked(
+            bool(self.context.settings.get("browser.default_downloader", False))
+        )
+        self.default_downloader_check.blockSignals(False)
 
         if status is not None:
             self.extension_path_label.setText(f"Folder: {status['extension_dir']}")

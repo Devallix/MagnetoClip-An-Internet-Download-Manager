@@ -60,11 +60,13 @@ def test_capture_rejected_when_integration_disabled(tmp_path):
 def test_settings_reports_flags(tmp_path):
     context = make_context(tmp_path)
     context.settings.set("browser.capture_enabled", False)
+    context.settings.set("browser.default_downloader", True)
     bridge = BrowserManager(context)
     response = bridge.handle_message({"type": "settings"})
     assert response["type"] == "settings_ok"
     assert response["integration_enabled"] is True
     assert response["capture_enabled"] is False
+    assert response["default_downloader"] is True
     asyncio.run(context.shutdown())
 
 
@@ -134,6 +136,81 @@ def test_capture_pending_when_confirm_enabled(tmp_path):
     assert pending[0].url == "https://example.com/file.zip"
     assert pending[0].status == "pending"
     asyncio.run(context.shutdown())
+
+
+def test_capture_pending_stores_cookies(tmp_path):
+    context = make_context(tmp_path)
+    context.settings.set("browser.confirm_capture", True)
+    bridge = BrowserManager(context)
+    response = bridge.handle_message(
+        {
+            "type": "capture",
+            "url": "https://example.com/file.zip",
+            "filename": "file.zip",
+            "source": "context_menu",
+            "cookies": "SID=abc123; HSID=def456",
+        }
+    )
+    assert response["type"] == "capture_pending"
+    with context.session_factory() as session:
+        from magnetoclip.database.repositories import PendingCaptureRepository
+
+        pending = PendingCaptureRepository(session).pending()
+    assert len(pending) == 1
+    assert pending[0].cookies_json == {"SID": "abc123", "HSID": "def456"}
+    asyncio.run(context.shutdown())
+
+
+def test_capture_pending_accepts_cookie_dict(tmp_path):
+    context = make_context(tmp_path)
+    context.settings.set("browser.confirm_capture", True)
+    bridge = BrowserManager(context)
+    response = bridge.handle_message(
+        {
+            "type": "capture",
+            "url": "https://example.com/file.zip",
+            "filename": "file.zip",
+            "cookies": {"SID": "abc123"},
+        }
+    )
+    assert response["type"] == "capture_pending"
+    with context.session_factory() as session:
+        from magnetoclip.database.repositories import PendingCaptureRepository
+
+        pending = PendingCaptureRepository(session).pending()
+    assert pending[0].cookies_json == {"SID": "abc123"}
+    asyncio.run(context.shutdown())
+
+
+@pytest.mark.asyncio
+async def test_capture_immediate_start_passes_cookies(tmp_path):
+    context = make_context(tmp_path)
+    context.settings.set("browser.confirm_capture", False)
+    bridge = BrowserManager(context)
+    bridge.start(asyncio.get_running_loop())
+
+    with PayloadServer(b"z" * 2048) as server:
+        response = bridge.handle_message(
+            {
+                "type": "capture",
+                "url": server.url,
+                "filename": "captured.bin",
+                "cookies": "SID=abc123; HSID=def456",
+            }
+        )
+        assert response["type"] == "capture_ok"
+        download = context.manager.get_download(response["download_id"])
+        headers = dict(download.headers_json or {})
+        assert headers.get("cookie") == "SID=abc123; HSID=def456"
+        deadline = asyncio.get_running_loop().time() + 15
+        status = None
+        while asyncio.get_running_loop().time() < deadline:
+            status = context.manager.get_download(response["download_id"]).status.value
+            if status in ("completed", "failed", "verification_failed"):
+                break
+            await asyncio.sleep(0.02)
+        assert status == "completed", f"expected completed, got {status}"
+    await context.shutdown()
 
 
 def test_page_scan_capture_always_pending(tmp_path):
@@ -243,6 +320,7 @@ async def test_status_reports_counts(tmp_path):
     assert response["active"] == 0
     assert response["completed"] == 0
     assert response["integration_enabled"] is True
+    assert response["default_downloader"] is False
 
     with PayloadServer(b"y" * 2048) as server:
         download = context.manager.add(server.url, filename="one.bin")
@@ -264,6 +342,26 @@ def test_extension_id_stable_and_valid(tmp_path):
     assert first == second
     assert len(first) == 32
     assert all(c in "abcdefghijklmnop" for c in first)
+
+
+def test_extension_id_matches_chromium_algorithm(tmp_path):
+    import hashlib
+
+    from cryptography.hazmat.primitives import serialization
+
+    from magnetoclip.browser.integration.install import extension_id_from_public_key
+
+    _key_path, public_key = ensure_extension_key(tmp_path)
+    spki = public_key.public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    alphabet = "abcdefghijklmnop"
+    expected = ""
+    for byte in hashlib.sha256(spki).digest()[:16]:
+        expected += alphabet[byte >> 4]
+        expected += alphabet[byte & 0x0F]
+    assert extension_id_from_public_key(public_key) == expected
 
 
 def test_host_manifest_chromium():

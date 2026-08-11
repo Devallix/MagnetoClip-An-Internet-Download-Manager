@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from magnetoclip.media.streaming import (
+    _write_cookiefile,
     is_audio_platform,
     is_streaming_url,
 )
@@ -48,3 +49,39 @@ def test_non_streaming_hosts_with_media_paths():
     # media-looking paths on a generic CDN are NOT streamed (no extractor)
     assert not is_streaming_url("https://example.com/videos/clip.mp4")
     assert not is_streaming_url("https://example.com/audio/podcast.mp3")
+
+
+def test_write_cookiefile_from_dict(tmp_path):
+    path = _write_cookiefile(
+        "https://www.youtube.com/watch?v=abc",
+        {"SID": "one", "HSID": "two"},
+    )
+    try:
+        assert path is not None
+        content = path.read_text(encoding="utf-8")
+        assert content.splitlines()[0] == "# Netscape HTTP Cookie File"
+        assert ".youtube.com\tTRUE\t/\tTRUE\t2147483647\tSID\tone" in content
+        assert "HSID\ttwo" in content
+    finally:
+        if path is not None:
+            path.unlink(missing_ok=True)
+
+
+def test_write_cookiefile_accepts_header_string(tmp_path):
+    path = _write_cookiefile(
+        "https://example.com/x",
+        "a=1; b=2",
+    )
+    try:
+        assert path is not None
+        content = path.read_text(encoding="utf-8")
+        assert ".example.com\tTRUE\t/\tTRUE\t2147483647\ta\t1" in content
+        assert "b\t2" in content
+    finally:
+        if path is not None:
+            path.unlink(missing_ok=True)
+
+
+def test_write_cookiefile_none_without_cookies():
+    assert _write_cookiefile("https://example.com/x", None) is None
+    assert _write_cookiefile("https://example.com/x", "") is None

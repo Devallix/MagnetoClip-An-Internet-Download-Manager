@@ -72,10 +72,10 @@ async def test_streaming_completion_rewrites_filename(tmp_path, monkeypatch):
     context = make_context(tmp_path)
     monkeypatch.setattr(
         "magnetoclip.core.downloads.manager.resolve_stream",
-        lambda url, quality: fake_info(title="Real Title"),
+        lambda url, quality, **kwargs: fake_info(title="Real Title"),
     )
 
-    def fake_download_stream(url, save_dir, quality, progress_cb, cancel_event):
+    def fake_download_stream(url, save_dir, quality, progress_cb, cancel_event, cookies=None):
         save_dir = save_dir / "Real Title.mp4"
         save_dir.write_bytes(b"x" * 1234)
         return save_dir
@@ -102,7 +102,7 @@ async def test_streaming_failure_marks_failed(tmp_path, monkeypatch):
     context = make_context(tmp_path)
     monkeypatch.setattr(
         "magnetoclip.core.downloads.manager.resolve_stream",
-        lambda url, quality: (_ for _ in ()).throw(
+        lambda url, quality, **kwargs: (_ for _ in ()).throw(
             __import__("magnetoclip.media.streaming", fromlist=["StreamResolutionError"]).StreamResolutionError("nope")
         ),
     )
@@ -121,11 +121,11 @@ async def test_streaming_cancel_marks_stopped(tmp_path, monkeypatch):
     context = make_context(tmp_path)
     monkeypatch.setattr(
         "magnetoclip.core.downloads.manager.resolve_stream",
-        lambda url, quality: fake_info(),
+        lambda url, quality, **kwargs: fake_info(),
     )
     cancel_event_holder = {}
 
-    def fake_download_stream(url, save_dir, quality, progress_cb, cancel_event):
+    def fake_download_stream(url, save_dir, quality, progress_cb, cancel_event, cookies=None):
         cancel_event_holder["event"] = cancel_event
         progress_cb(
             {
@@ -162,11 +162,11 @@ async def test_streaming_pause_resume_restarts(tmp_path, monkeypatch):
     context = make_context(tmp_path)
     monkeypatch.setattr(
         "magnetoclip.core.downloads.manager.resolve_stream",
-        lambda url, quality: fake_info(),
+        lambda url, quality, **kwargs: fake_info(),
     )
     calls = []
 
-    def fake_download_stream(url, save_dir, quality, progress_cb, cancel_event):
+    def fake_download_stream(url, save_dir, quality, progress_cb, cancel_event, cookies=None):
         calls.append("start")
         while not cancel_event.is_set():
             time.sleep(0.01)
@@ -199,3 +199,55 @@ async def test_streaming_pause_resume_restarts(tmp_path, monkeypatch):
     assert len(calls) == 2
     context.manager.cancel(download.id)
     await context.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_streaming_cookies_reach_resolve_and_download(tmp_path, monkeypatch):
+    context = make_context(tmp_path)
+    seen = {}
+
+    def fake_resolve(url, quality, **kwargs):
+        seen["resolve_cookies"] = kwargs.get("cookies")
+        return fake_info(title="Cookie Video")
+
+    def fake_download(url, save_dir, quality, progress_cb, cancel_event, cookies=None):
+        seen["download_cookies"] = cookies
+        path = save_dir / "Cookie Video.mp4"
+        path.write_bytes(b"x" * 4321)
+        return path
+
+    monkeypatch.setattr(
+        "magnetoclip.core.downloads.manager.resolve_stream", fake_resolve
+    )
+    monkeypatch.setattr(
+        "magnetoclip.core.downloads.manager.download_stream", fake_download
+    )
+
+    download = context.manager.add(
+        "https://www.youtube.com/watch?v=cookied",
+        cookies={"SID": "abc123", "HSID": "def456"},
+    )
+    context.manager.start(download.id)
+
+    await wait_for_status(context.manager, download.id, "completed")
+    assert seen["resolve_cookies"] == {"SID": "abc123", "HSID": "def456"}
+    assert seen["download_cookies"] == {"SID": "abc123", "HSID": "def456"}
+    await context.shutdown()
+
+
+def test_stream_cookies_parses_stored_header(tmp_path):
+    context = make_context(tmp_path)
+    download = context.manager.add(
+        "https://www.youtube.com/watch?v=cookie2",
+        cookies={"SID": "abc123", "HSID": "def456"},
+    )
+    parsed = context.manager._stream_cookies(download)
+    assert parsed == {"SID": "abc123", "HSID": "def456"}
+    context.database.close()
+
+
+def test_stream_cookies_none_without_header(tmp_path):
+    context = make_context(tmp_path)
+    download = context.manager.add("https://www.youtube.com/watch?v=plain")
+    assert context.manager._stream_cookies(download) is None
+    context.database.close()

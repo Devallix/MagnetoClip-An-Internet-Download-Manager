@@ -23,6 +23,7 @@ from magnetoclip.services.logging import get_logger
 from ..dialogs.capture import (
     RESULT_DOWNLOAD_NOW,
     RESULT_SKIP,
+    RESULT_SKIP_ALL,
     CaptureDialog,
 )
 
@@ -114,6 +115,9 @@ class CaptureWatcher(QObject):
         return 1
 
     def _apply_decision(self, capture, result, dialog) -> None:
+        if result == RESULT_SKIP_ALL:
+            self._reject_all_pending()
+            return
         if result == RESULT_SKIP:
             self._resolve(capture.id, "rejected")
             return
@@ -125,6 +129,7 @@ class CaptureWatcher(QObject):
                 category_name=dialog.category(),
                 connections_max=dialog.connections(),
                 headers={"Referer": capture.referrer} if capture.referrer else None,
+                cookies=capture.cookies_json,
             )
         except Exception as exc:  # noqa: BLE001 - surface add failures as a rejection
             log.warning("capture_add_failed", capture_id=capture.id, error=str(exc))
@@ -146,3 +151,7 @@ class CaptureWatcher(QObject):
             PendingCaptureRepository(session).resolve(
                 capture_id, status, download_id=download_id
             )
+
+    def _reject_all_pending(self) -> None:
+        with self.context.session_factory() as session:
+            PendingCaptureRepository(session).resolve_all("rejected")

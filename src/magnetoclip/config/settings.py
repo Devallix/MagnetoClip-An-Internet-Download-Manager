@@ -26,6 +26,7 @@ DEFAULTS: dict[str, Any] = {
     # Browser
     "browser.integration_enabled": False,
     "browser.capture_enabled": True,
+    "browser.default_downloader": False,
     "browser.confirm_capture": True,
     "browser.notify_downloadable": True,
     # Scheduler

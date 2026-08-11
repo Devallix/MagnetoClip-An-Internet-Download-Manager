@@ -104,6 +104,7 @@ class BrowserManager:
             headers={"Referer": str(message["referrer"])}
             if message.get("referrer")
             else None,
+            cookies=self._parse_cookies(message.get("cookies")),
         )
         self.context.events.post(
             Events.BROWSER_EVENT,
@@ -134,6 +135,7 @@ class BrowserManager:
                 referrer=message.get("referrer") or None,
                 source=str(message.get("source") or "browser"),
                 detected_type=str(message.get("detected_type") or "file"),
+                cookies=self._parse_cookies(message.get("cookies")),
             )
 
     def _page_scan(self, message: dict[str, Any]) -> dict[str, Any]:
@@ -177,6 +179,9 @@ class BrowserManager:
             "capture_enabled": bool(
                 self.context.settings.get("browser.capture_enabled", True)
             ),
+            "default_downloader": bool(
+                self.context.settings.get("browser.default_downloader", False)
+            ),
         }
 
     def _settings(self) -> dict[str, Any]:
@@ -188,9 +193,25 @@ class BrowserManager:
             "capture_enabled": bool(
                 self.context.settings.get("browser.capture_enabled", True)
             ),
+            "default_downloader": bool(
+                self.context.settings.get("browser.default_downloader", False)
+            ),
         }
 
     # ----- helpers -----
+
+    @staticmethod
+    def _parse_cookies(value) -> dict[str, str] | None:
+        """Accept a cookie header string or dict and return ``{name: value}``."""
+        if not value:
+            return None
+        if isinstance(value, dict):
+            return {str(k): str(v) for k, v in value.items() if v is not None}
+        if isinstance(value, str):
+            from magnetoclip.network.cookies.jar import parse_cookie_header
+
+            return parse_cookie_header(value)
+        return None
 
     @staticmethod
     def _validate_url(url: str) -> str | None:

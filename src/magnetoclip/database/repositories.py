@@ -361,6 +361,7 @@ class PendingCaptureRepository:
         referrer: str | None = None,
         source: str | None = None,
         detected_type: str | None = None,
+        cookies: dict[str, str] | None = None,
     ) -> PendingCapture:
         capture = PendingCapture(
             url=url,
@@ -368,6 +369,7 @@ class PendingCaptureRepository:
             referrer=referrer,
             source=source,
             detected_type=detected_type,
+            cookies_json=cookies or None,
             status="pending",
         )
         self.session.add(capture)
@@ -384,6 +386,14 @@ class PendingCaptureRepository:
                 .limit(limit)
             ).all()
         )
+
+    def resolve_all(self, status: str, limit: int = 100) -> int:
+        pending = self.pending(limit=limit)
+        for capture in pending:
+            capture.status = status
+        if pending:
+            self.session.commit()
+        return len(pending)
 
     def get(self, capture_id: int) -> Optional[PendingCapture]:
         return self.session.get(PendingCapture, capture_id)

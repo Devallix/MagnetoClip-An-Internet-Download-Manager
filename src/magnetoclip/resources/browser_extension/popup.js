@@ -19,6 +19,7 @@ const els = {
   statCompleted: document.getElementById("stat-completed"),
   badgeIntegration: document.getElementById("badge-integration"),
   badgeCapture: document.getElementById("badge-capture"),
+  badgeDefaultDownloader: document.getElementById("badge-default-downloader"),
   detectedList: document.getElementById("detected-list"),
   detectedEmpty: document.getElementById("detected-empty"),
   errorBox: document.getElementById("error-box"),
@@ -57,6 +58,7 @@ function setState(response) {
   els.statCompleted.textContent = String(response.completed || 0);
   setPill(els.badgeIntegration, response.integration_enabled);
   setPill(els.badgeCapture, response.capture_enabled);
+  setPill(els.badgeDefaultDownloader, response.default_downloader);
 }
 
 function setError(message) {
@@ -71,13 +73,19 @@ function typeLabel(type) {
 }
 
 function sendDownload(file, pageUrl) {
-  chrome.runtime.sendMessage({
-    type: "download_file",
-    url: file.url,
-    filename: file.filename || "",
-    referrer: pageUrl,
-    detected_type: file.detected_type || "file",
-  });
+  try {
+    chrome.runtime.sendMessage({
+      type: "download_file",
+      url: file.url,
+      filename: file.filename || "",
+      referrer: pageUrl,
+      detected_type: file.detected_type || "file",
+    });
+  } catch (error) {
+    if (/Extension context invalidated/i.test(String(error && error.message))) {
+      setError("The extension was updated. Reload this page and try again.");
+    }
+  }
 }
 
 function renderDetected(data) {
@@ -128,14 +136,18 @@ function renderDetected(data) {
 }
 
 function queryDetected() {
-  chrome.runtime.sendMessage({ type: "detected_files" }, (response) => {
-    if (chrome.runtime.lastError) {
-      return;
-    }
-    if (response && response.type === "detected_files_ok") {
-      renderDetected(response);
-    }
-  });
+  try {
+    chrome.runtime.sendMessage({ type: "detected_files" }, (response) => {
+      if (chrome.runtime.lastError) {
+        return;
+      }
+      if (response && response.type === "detected_files_ok") {
+        renderDetected(response);
+      }
+    });
+  } catch (error) {
+    /* extension was reloaded; next refresh() will recover */
+  }
 }
 
 function query() {

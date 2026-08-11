@@ -236,6 +236,7 @@ class PendingCapture(Base):
     referrer: Mapped[Optional[str]] = mapped_column(String(4096))
     source: Mapped[Optional[str]] = mapped_column(String(64))
     detected_type: Mapped[Optional[str]] = mapped_column(String(64))
+    cookies_json: Mapped[Optional[dict]] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(16), default="pending")
     download_id: Mapped[Optional[int]] = mapped_column(ForeignKey("downloads.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

@@ -12,6 +12,14 @@
 (() => {
   "use strict";
 
+  // The background worker re-injects this script into already-open tabs after
+  // the extension is reloaded (existing instances keep running on a dead
+  // context). Guard so a tab never runs two scanning instances.
+  if (window.__magnetoclipContentActive) {
+    return;
+  }
+  window.__magnetoclipContentActive = true;
+
   const DOWNLOADABLE_EXTS = new Set([
     // video
     "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "ts", "mts",
@@ -47,27 +55,66 @@
     "instagram.com",
     "t.me", "telegram.me", "web.telegram.org",
     "snapchat.com",
+    "reddit.com",
+    "linkedin.com",
+    "pinterest.com", "pin.it",
+    "tumblr.com",
+    "threads.net",
+    "discord.com",
+    "web.whatsapp.com",
+    "weibo.com",
+    "vk.com",
+    "9gag.com",
   ]);
 
   // Hosts where MagnetoClip can resolve a whole page/post URL to media (via
   // yt-dlp), used when the real media is hidden behind blob:/MSE streams.
+  // NOTE: Facebook and X/Twitter are deliberately NOT listed here — yt-dlp's
+  // extractors for them are unreliable, so offering the page URL only produces
+  // failed downloads. Those platforms rely on direct media-CDN captures instead
+  // (see MEDIA_CDN_HOSTS).
   const YTDLP_HOSTS = new Set([
-    "twitter.com", "x.com",
-    "facebook.com", "fb.watch",
-    "instagram.com",
     "youtube.com", "youtu.be",
     "vimeo.com",
     "twitch.tv",
     "tiktok.com",
     "dailymotion.com",
+    "instagram.com",
     "reddit.com",
+    "linkedin.com",
+    "pinterest.com",
+    "tumblr.com",
+  ]);
+
+  // Media CDNs whose stream requests are often labelled with a generic
+  // initiator type, so we capture them directly even when the video plays
+  // through a blob:/MSE pipeline.
+  const MEDIA_CDN_HOSTS = new Set([
+    "fbcdn.net",            // Facebook
+    "twimg.com",            // X / Twitter (video.twimg.com)
+    "cdn.telegram.org",     // Telegram
+    "telegram.org",
+    "cdninstagram.com",     // Instagram
+    "pinimg.com",           // Pinterest
+    "cdn.discordapp.com",   // Discord
+    "media.discordapp.net", // Discord
+    "media.licdn.com",      // LinkedIn
+    "redd.it",              // Reddit (i.redd.it, v.redd.it, preview.redd.it)
+    "tumblr.com",           // Tumblr (64.media.tumblr.com)
+    "whatsapp.net",         // WhatsApp Web media (mmg.whatsapp.net)
   ]);
 
   // HLS/DASH transport files that are useless to download on their own.
   const STREAM_EXTS = new Set(["m3u8", "m3u", "mpd"]);
   // Video segment files; captured from network resources they are almost always
   // pieces of a larger stream, so we do not offer them directly.
-  const SEGMENT_EXTS = new Set(["ts", "mts", "m2ts"]);
+  const SEGMENT_EXTS = new Set(["ts", "mts", "m2ts", "m4s"]);
+  // File extensions that identify a complete media file worth offering.
+  const MEDIA_EXTS = new Set([
+    "mp4", "m4v", "webm", "mkv", "mov", "avi",
+    "mp3", "m4a", "aac", "ogg", "opus", "wav", "flac",
+    "jpg", "jpeg", "png", "gif", "webp", "bmp", "avif",
+  ]);
 
   const MAX_CAPTURES_PER_SCAN = 4;
   const MAX_PAGE_SCAN_FILES = 20;
@@ -79,8 +126,96 @@
   // Social hosts already covered by a "post URL" capture.
   const reportedPageHosts = new Set();
 
+  // Network resources observed live by a PerformanceObserver. Scanning only
+  // ``performance.getEntriesByType("resource")`` misses media on heavy pages:
+  // the resource-timing buffer (~250 entries) evicts older requests and the
+  // periodic poll can run after the entry it cares about has been dropped.
+  // Observing resources as they load (plus a larger buffer) guarantees blob/MSE
+  // players (Facebook reels, X videos, Telegram) hand their CDN file URLs to
+  // us. Map: url -> initiatorType.
+  const observedResources = new Map();
+  let resourceObserver = null;
+
+  function observeNetworkResources() {
+    try {
+      if (typeof performance.setResourceTimingBufferSize === "function") {
+        performance.setResourceTimingBufferSize(4000);
+      }
+    } catch (error) {
+      /* older browsers */
+    }
+    if (typeof PerformanceObserver === "undefined") {
+      return;
+    }
+    try {
+      resourceObserver = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          observedResources.set(
+            String(entry.name || ""),
+            String(entry.initiatorType || "").toLowerCase()
+          );
+        }
+        scheduleScan();
+      });
+      resourceObserver.observe({ type: "resource", buffered: true });
+    } catch (error) {
+      resourceObserver = null;
+    }
+  }
+
   let social = false;
   let scanTimer = null;
+  let pollInterval = null;
+  let domObserver = null;
+  let contextGone = false;
+
+  // ----- messaging -----
+
+  // The extension context can be invalidated while this content script is still
+  // injected (e.g. when the app refreshes the unpacked extension and Chrome
+  // reloads it). Every later chrome.* call then throws "Extension context
+  // invalidated." — a *synchronous* throw, not a rejected promise — which would
+  // otherwise spam the console and kill the page scan. When that happens we
+  // stop scanning cleanly instead of erroring forever.
+  function safeSend(message) {
+    if (contextGone) {
+      return;
+    }
+    try {
+      const result = chrome.runtime.sendMessage(message);
+      if (result && typeof result.catch === "function") {
+        result.catch((error) => {
+          if (/Extension context invalidated/i.test(String(error))) {
+            stopScanning();
+          }
+        });
+      }
+    } catch (error) {
+      if (/Extension context invalidated/i.test(String(error && error.message))) {
+        stopScanning();
+      }
+    }
+  }
+
+  function stopScanning() {
+    contextGone = true;
+    if (scanTimer) {
+      clearTimeout(scanTimer);
+      scanTimer = null;
+    }
+    if (pollInterval) {
+      clearInterval(pollInterval);
+      pollInterval = null;
+    }
+    if (domObserver) {
+      domObserver.disconnect();
+      domObserver = null;
+    }
+    if (resourceObserver) {
+      resourceObserver.disconnect();
+      resourceObserver = null;
+    }
+  }
 
   // ----- url helpers -----
 
@@ -102,6 +237,93 @@
     return Array.from(YTDLP_HOSTS).some(
       (candidate) => host === candidate || host.endsWith("." + candidate)
     );
+  }
+
+  function isMediaCdnUrl(url) {
+    const host = hostOf(url);
+    if (!host) {
+      return false;
+    }
+    const onCdn = Array.from(MEDIA_CDN_HOSTS).some(
+      (candidate) => host === candidate || host.endsWith("." + candidate)
+    );
+    if (!onCdn) {
+      return false;
+    }
+    const path = (url.split(/[?#]/)[0] || "").toLowerCase();
+    const ext = extensionOf(url);
+    if (STREAM_EXTS.has(ext) || SEGMENT_EXTS.has(ext)) {
+      return false;
+    }
+    // Telegram's internal stream proxy is not a direct file.
+    if (host.endsWith("telegram.org") && path.includes("/k/stream/")) {
+      return false;
+    }
+    // Facebook: /v/ paths are progressive video files; image paths on fbcdn
+    // are too noisy (avatars, previews) to offer from the network log — the
+    // DOM scanner already covers images there.
+    if (host.endsWith("fbcdn.net")) {
+      return path.includes("/v/") || MEDIA_EXTS.has(ext);
+    }
+    if (host.endsWith("twimg.com")) {
+      return (
+        /\/ext_tw_video\/|\/amplify_video\/|\/tweet_video\//.test(path) ||
+        MEDIA_EXTS.has(ext)
+      );
+    }
+    // Telegram serves every uploaded file under /file/ (photos, videos, docs).
+    if (host.endsWith("cdn.telegram.org")) {
+      return path.includes("/file/") && MEDIA_EXTS.has(ext);
+    }
+    return MEDIA_EXTS.has(ext);
+  }
+
+  // Telegram Web plays videos through an internal /k/stream/ proxy that only
+  // works with the page's session cookie; it responds with a Location-less 302
+  // (its own HTML shell) when the cookie is missing, so downloading the proxy
+  // URL directly always fails. From the content script the fetch is same-origin
+  // (cookies are sent automatically), so we follow the redirect with a tiny
+  // Range request and offer the resolved CDN file instead. The resolved URL is
+  // cached per source so later scans re-offer it (the browser refuses to hand
+  // over cross-origin redirect targets without CORS, so this is best-effort;
+  // the background worker's webRequest fallback covers the cases that fail).
+  // Map: src -> {url, type} (or null when resolution failed / is in flight).
+  const resolvedStreams = new Map();
+
+  function resolveTelegramStream(src, direct, fallbackType) {
+    if (resolvedStreams.has(src)) {
+      const cached = resolvedStreams.get(src);
+      if (cached) {
+        addDirect(direct, cached.url, cached.type);
+      }
+      return;
+    }
+    resolvedStreams.set(src, null);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
+    fetch(src, {
+      credentials: "same-origin",
+      headers: { "Range": "bytes=0-0" },
+      signal: controller.signal,
+    })
+      .then((response) => {
+        clearTimeout(timer);
+        const finalUrl = String(response.url || "");
+        if (!isHttpUrl(finalUrl) || finalUrl === src) {
+          return;
+        }
+        const ext = extensionOf(finalUrl);
+        if (STREAM_EXTS.has(ext) || SEGMENT_EXTS.has(ext)) {
+          return;
+        }
+        const type = typeFor(ext);
+        const resolvedType = type === "file" ? fallbackType : type;
+        resolvedStreams.set(src, { url: finalUrl, type: resolvedType });
+        addDirect(direct, finalUrl, resolvedType);
+      })
+      .catch(() => {
+        clearTimeout(timer);
+      });
   }
 
   function extensionOf(url) {
@@ -235,7 +457,12 @@
           continue;
         }
         // Extensionless media URLs (Telegram/Snapchat CDNs) still count when
-        // they come straight from a media element.
+        // they come straight from a media element. Telegram's /k/stream proxy
+        // URL is resolved to its real CDN file before it can be offered.
+        if (hostOf(src).endsWith("telegram.org") && src.includes("/k/stream/")) {
+          resolveTelegramStream(src, direct, fallbackType);
+          continue;
+        }
         addDirect(direct, src, fallbackType);
       }
     }
@@ -256,21 +483,77 @@
     }
   }
 
+  // Anchors flagged as downloads (``download`` attribute or an aria-label that
+  // mentions downloading). Media-sharing sites and Telegram document lists use
+  // these instead of plain links with a file extension.
+  function scanDownloadAnchors(direct) {
+    for (const link of document.querySelectorAll("a[href]")) {
+      const isDownloadLink =
+        link.hasAttribute("download") ||
+        /download/i.test(link.getAttribute("aria-label") || "");
+      if (!isDownloadLink) {
+        continue;
+      }
+      let url = "";
+      try {
+        url = link.href || "";
+      } catch (error) {
+        continue;
+      }
+      if (!isHttpUrl(url) || direct.has(url)) {
+        continue;
+      }
+      const ext = extensionOf(url);
+      addDirect(direct, url, ext ? typeFor(ext) : "file");
+    }
+  }
+
   function scanPerformanceResources(direct, manifests) {
-    const entries = performance.getEntriesByType("resource") || [];
+    const now = performance.getEntriesByType("resource") || [];
+    const seenNow = new Set();
+    const entries = [];
+    for (const entry of now) {
+      const name = String(entry.name || "");
+      if (seenNow.has(name)) {
+        continue;
+      }
+      seenNow.add(name);
+      entries.push({
+        name: name,
+        initiatorType: String(entry.initiatorType || "").toLowerCase(),
+      });
+    }
+    for (const [name, initiatorType] of observedResources) {
+      if (seenNow.has(name)) {
+        continue;
+      }
+      seenNow.add(name);
+      entries.push({ name: name, initiatorType: initiatorType });
+    }
     for (const entry of entries) {
-      const url = String(entry.name || "");
+      const url = entry.name || "";
       if (!isHttpUrl(url)) {
         continue;
       }
+      const initiator = entry.initiatorType || "";
       const ext = extensionOf(url);
       if (STREAM_EXTS.has(ext)) {
         manifests.add(url);
         continue;
       }
-      const initiator = String(entry.initiatorType || "").toLowerCase();
-      if (initiator !== "video" && initiator !== "audio" && initiator !== "media") {
+      // Telegram's stream proxy requests show up in the network log too; they
+      // are resolved to their real CDN file regardless of initiator type.
+      if (hostOf(url).endsWith("telegram.org") && url.includes("/k/stream/")) {
+        resolveTelegramStream(url, direct, initiator === "audio" ? "audio" : "video");
         continue;
+      }
+      if (initiator !== "video" && initiator !== "audio" && initiator !== "media") {
+        // Blob-backed players (Facebook reels, X videos, Telegram) fetch their
+        // media with a generic initiator type; media-CDN URLs are still real
+        // files worth capturing.
+        if (!isMediaCdnUrl(url)) {
+          continue;
+        }
       }
       if (SEGMENT_EXTS.has(ext)) {
         continue;
@@ -326,7 +609,7 @@
       }
       reportedUrls.add(capture.url);
     }
-    chrome.runtime.sendMessage({
+    safeSend({
       type: "social_capture",
       url: location.href,
       files: captures,
@@ -372,7 +655,7 @@
     for (const file of files) {
       reportedUrls.add(file.url);
     }
-    chrome.runtime.sendMessage({
+    safeSend({
       type: "page_scan",
       url: location.href,
       files: files,
@@ -411,7 +694,7 @@
       return;
     }
     lastDetectionReport = snapshot;
-    chrome.runtime.sendMessage({
+    safeSend({
       type: "detection_update",
       url: location.href,
       title: pageTitle(),
@@ -434,6 +717,9 @@
   }
 
   function scan() {
+    if (contextGone) {
+      return;
+    }
     const direct = new Map();
     const manifests = new Set();
     const blobDetected = { value: false };
@@ -441,6 +727,7 @@
     scanAnchors(direct, manifests);
     scanMediaElements(direct, manifests, blobDetected);
     scanImages(direct);
+    scanDownloadAnchors(direct);
     scanPerformanceResources(direct, manifests);
 
     const pageHost = hostOf(location.href);
@@ -462,7 +749,7 @@
   }
 
   function scheduleScan() {
-    if (scanTimer) {
+    if (contextGone || scanTimer) {
       return;
     }
     scanTimer = setTimeout(() => {
@@ -472,12 +759,13 @@
   }
 
   function startWatching() {
-    const observer = new MutationObserver(scheduleScan);
-    observer.observe(document.documentElement, {
+    observeNetworkResources();
+    domObserver = new MutationObserver(scheduleScan);
+    domObserver.observe(document.documentElement, {
       childList: true,
       subtree: true,
     });
-    setInterval(scan, 6000);
+    pollInterval = setInterval(scan, 6000);
 
     // Fire a scan the instant a video starts playing so YouTube & co. are
     // offered without waiting for the next polling tick.

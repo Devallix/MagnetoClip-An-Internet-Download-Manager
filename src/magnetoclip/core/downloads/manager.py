@@ -369,6 +369,7 @@ class DownloadManager:
                     url = download.url
                     save_dir = Path(download.save_path).parent
                     save_dir.mkdir(parents=True, exist_ok=True)
+                    cookies = self._stream_cookies(download)
                 quality = str(
                     self.settings.get("streaming.quality", "best") or "best"
                 )
@@ -377,7 +378,9 @@ class DownloadManager:
                     Events.DOWNLOAD_STATE_CHANGED,
                     {"id": download_id, "state": "connecting"},
                 )
-                info = await asyncio.to_thread(resolve_stream, url, quality)
+                info = await asyncio.to_thread(
+                    resolve_stream, url, quality, cookies=cookies
+                )
 
                 with self.session_factory() as session:
                     repo = DownloadRepository(session)
@@ -403,6 +406,7 @@ class DownloadManager:
                     quality,
                     self._make_stream_progress(download_id),
                     cancel_event,
+                    cookies=cookies,
                 )
 
                 self._finalize_stream(download_id, "completed", final_path)
@@ -416,6 +420,17 @@ class DownloadManager:
                 self._fail_stream(download_id, f"stream download failed: {exc}")
             finally:
                 self._stream_cancel.pop(download_id, None)
+
+    @staticmethod
+    def _stream_cookies(download) -> dict[str, str] | None:
+        """Pull the browser ``Cookie`` header stored on a streaming download."""
+        headers = dict(download.headers_json or {})
+        cookie = headers.pop("cookie", None)
+        if not cookie:
+            return None
+        from ...network.cookies.jar import parse_cookie_header
+
+        return parse_cookie_header(cookie) or None
 
     def _make_stream_progress(self, download_id: int):
         def _hook(d: dict) -> None:
