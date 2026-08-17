@@ -1,8 +1,8 @@
 {
     "version": "0.1.2",
-    "download_url": "https://github.com/Devallix/MagnetoClip-An-Internet-Download-Manager/raw/refs/heads/main/releases/MagnetoClip-0.1.1.zip",
-    "release_notes": "",
-    "release_date": "",
+    "download_url": "https://github.com/Devallix/MagnetoClip-An-Internet-Download-Manager/raw/refs/heads/main/releases/MagnetoClip-0.1.2.zip",
+    "release_notes": "Bug fixes",
+    "release_date": "17/08/2026",
     "min_version": "0.1.0",
     "size_bytes": 76074027,
     "filename": "MagnetoClip-0.1.2.zip",
