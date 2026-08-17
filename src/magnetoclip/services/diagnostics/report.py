@@ -41,7 +41,7 @@ class DiagnosticReport:
             "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "application": {
                 "name": "MagnetoClip",
-                "version": "0.1.1",
+                "version": "0.1.2",
                 "python": sys.version.split()[0],
                 "platform": platform.platform(),
             },

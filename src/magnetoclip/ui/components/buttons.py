@@ -97,6 +97,7 @@ class CategoryButton(QFrame):
         self.count_label.setVisible(not compact)
         self.layout().setContentsMargins(8 if compact else 10, 8, 8, 8)
         self.icon_label.setAlignment(Qt.AlignCenter if compact else Qt.AlignLeft | Qt.AlignVCenter)
+        self.setToolTip(self.name_label.text() if compact else "")
 
     def set_active(self, active: bool) -> None:
         self.setProperty("active", "true" if active else "false")

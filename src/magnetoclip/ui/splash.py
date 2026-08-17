@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import math
-from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
 from PySide6.QtWidgets import QWidget
 
+from magnetoclip.resources import resource_path
 from magnetoclip.version import __app_name__, __tagline__, __version__
 
 
@@ -33,7 +33,7 @@ class SplashScreen(QWidget):
         self._icon = self._load_icon()
 
     def _load_icon(self) -> QPixmap:
-        img_path = Path(__file__).resolve().parents[3] / "img" / "logo.png"
+        img_path = resource_path("icons", "logo.png")
         return QPixmap(str(img_path))
 
     def _rotate(self) -> None:

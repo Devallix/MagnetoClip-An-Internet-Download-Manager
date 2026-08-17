@@ -36,7 +36,7 @@ def test_table_header_sections_have_borders(qapp):
 def test_main_window_constructs(qtbot, context):
     window = MainWindow(context)
     qtbot.addWidget(window)
-    assert window.windowTitle() == "MagnetoClip 0.1.1"
+    assert window.windowTitle() == "MagnetoClip 0.1.2"
     assert window.sidebar is not None
     assert window.stack.count() == 9
 

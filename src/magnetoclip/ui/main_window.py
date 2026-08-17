@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt
 from PySide6.QtGui import QPixmap, QResizeEvent
 from PySide6.QtWidgets import (
@@ -23,7 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from magnetoclip.core.events.bus import Events
-from magnetoclip.resources import app_icon
+from magnetoclip.resources import app_icon, resource_path
 from magnetoclip.services.logging.setup import get_logger
 from magnetoclip.version import __version__
 
@@ -266,7 +264,7 @@ class MainWindow(QMainWindow):
         self.logo_label = QLabel()
         self.logo_label.setObjectName("sidebar_logo")
         self.logo_label.setAlignment(Qt.AlignCenter)
-        img_path = Path(__file__).resolve().parents[3] / "img" / "magnetoclip.png"
+        img_path = resource_path("icons", "magnetoclip.png")
         pixmap = QPixmap(str(img_path))
         if not pixmap.isNull():
             self.logo_label.setPixmap(pixmap.scaled(160, 160, Qt.KeepAspectRatio, Qt.SmoothTransformation))

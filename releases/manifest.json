@@ -1,10 +1,10 @@
 {
-    "version": "0.1.1",
-    "download_url": "",
+    "version": "0.1.2",
+    "download_url": "https://github.com/Devallix/MagnetoClip-An-Internet-Download-Manager/raw/refs/heads/main/releases/MagnetoClip-0.1.1.zip",
     "release_notes": "",
     "release_date": "",
     "min_version": "0.1.0",
-    "size_bytes": 74070929,
-    "filename": "MagnetoClip-0.1.1.zip",
-    "sha256": "0d6a1a5f483c1b3bec93920f42958be094d5076e2084a6b0359a7308516ca62a"
+    "size_bytes": 76074027,
+    "filename": "MagnetoClip-0.1.2.zip",
+    "sha256": "955a961ee878491baf8f6337aacb5093d97c3b623ba63ab69628de59adfe75e2"
 }
