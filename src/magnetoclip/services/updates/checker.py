@@ -76,8 +76,8 @@ class UpdateChecker:
         self.endpoint = endpoint
         self.timeout = timeout
 
-    async def check(self, current_version: str) -> CheckResult:
-        """Check for updates by fetching the manifest.json endpoint.
+    def check_sync(self, current_version: str) -> CheckResult:
+        """Synchronous update check by fetching the manifest.json endpoint.
 
         The manifest.json format:
         {
@@ -92,8 +92,8 @@ class UpdateChecker:
         checked_at = datetime.now(UTC).isoformat(timespec="seconds")
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.get(
+            with httpx.Client(timeout=self.timeout, follow_redirects=True) as client:
+                response = client.get(
                     self.endpoint,
                     headers={"Accept": "application/json"},
                 )

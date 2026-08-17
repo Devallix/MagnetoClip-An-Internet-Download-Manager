@@ -44,12 +44,12 @@ class UpdateDownloader:
         """Request cancellation of the current download."""
         self._cancel_requested = True
 
-    async def download(
+    def download_sync(
         self,
         update_info: UpdateInfo,
         on_progress: Callable[[DownloadProgress], None] | None = None,
     ) -> Path | None:
-        """Download the update zip file to a temporary location.
+        """Synchronous download of the update zip file to a temporary location.
 
         Returns the path to the downloaded file, or None on failure/cancellation.
         """
@@ -67,8 +67,8 @@ class UpdateDownloader:
             filename = self._filename_from_url(url)
             dest = temp_dir / filename
 
-            async with httpx.AsyncClient(timeout=600) as client:
-                async with client.stream("GET", url) as response:
+            with httpx.Client(timeout=600, follow_redirects=True) as client:
+                with client.stream("GET", url) as response:
                     response.raise_for_status()
 
                     total = int(response.headers.get("content-length", 0))
@@ -77,7 +77,7 @@ class UpdateDownloader:
 
                     downloaded = 0
                     with open(dest, "wb") as f:
-                        async for chunk in response.aiter_bytes(chunk_size=65536):
+                        for chunk in response.iter_bytes(chunk_size=65536):
                             if self._cancel_requested:
                                 log.info("update_download_cancelled")
                                 return None

@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -28,6 +27,46 @@ from magnetoclip.version import __version__
 from ..components.buttons import AccentButton
 from ..dialogs.proxy import ProxyDialog
 from .base import Page, make_scrollable
+
+
+class _UpdateCheckWorker(QThread):
+    """Background worker for update checks (avoids qasync task conflicts)."""
+
+    finished = Signal(object)
+
+    def __init__(self, endpoint: str, current_version: str, parent=None) -> None:
+        super().__init__(parent)
+        self._endpoint = endpoint
+        self._current_version = current_version
+
+    def run(self) -> None:
+        from magnetoclip.services.updates import UpdateChecker
+
+        checker = UpdateChecker(self._endpoint)
+        result = checker.check_sync(self._current_version)
+        self.finished.emit(result)
+
+
+class _UpdateDownloadWorker(QThread):
+    """Background worker for update downloads (avoids qasync task conflicts)."""
+
+    progress = Signal(object)
+    finished = Signal(object)
+
+    def __init__(self, update_info, parent=None) -> None:
+        super().__init__(parent)
+        self._update_info = update_info
+        self._downloader = None
+
+    def run(self) -> None:
+        from magnetoclip.services.updates import UpdateDownloader
+
+        self._downloader = UpdateDownloader()
+        result = self._downloader.download_sync(
+            self._update_info,
+            on_progress=lambda p: self.progress.emit(p),
+        )
+        self.finished.emit(result)
 
 
 class SettingsPage(Page):
@@ -251,7 +290,7 @@ class SettingsPage(Page):
         self._load_proxy_combo()
 
     def _check_for_updates(self) -> None:
-        """Check for updates asynchronously."""
+        """Check for updates using a background thread."""
         endpoint = self.updates_endpoint_edit.text().strip()
         if not endpoint:
             QMessageBox.warning(self, "Check for Updates", "Please enter an update endpoint URL.")
@@ -264,57 +303,51 @@ class SettingsPage(Page):
         self._pending_update_info = None
         self._downloaded_installer = None
 
-        from magnetoclip.services.updates import UpdateChecker
+        self._update_worker = _UpdateCheckWorker(endpoint, __version__, self)
+        self._update_worker.finished.connect(self._on_update_check_done)
+        self._update_worker.start()
 
-        checker = UpdateChecker(endpoint)
-
-        async def _do_check() -> None:
-            try:
-                result = await checker.check(__version__)
-                from datetime import UTC, datetime
-
-                now = datetime.now(UTC).isoformat(timespec="seconds")
-                self.context.settings.set("updates.last_checked", now)
-                self.updates_status_label.setText(now)
-
-                if result.update_available:
-                    info = result.update_info
-                    self._pending_update_info = info
-                    self.updates_version_label.setText(result.latest_version)
-                    self.download_updates_button.setVisible(True)
-                    self.download_updates_button.setEnabled(True)
-                    message = f"A new version {result.latest_version} is available!"
-                    if info and info.release_notes:
-                        message += f"\n\nRelease notes:\n{info.release_notes}"
-                    QMessageBox.information(self, "Update Available", message)
-                elif result.error:
-                    self.updates_version_label.setText("")
-                    QMessageBox.warning(
-                        self, "Check for Updates", f"Error: {result.error}"
-                    )
-                else:
-                    self.updates_version_label.setText("")
-                    QMessageBox.information(
-                        self,
-                        "Check for Updates",
-                        f"You are running the latest version ({__version__}).",
-                    )
-            except Exception as exc:
-                QMessageBox.warning(
-                    self, "Check for Updates", f"Failed to check for updates: {exc}"
-                )
-            finally:
-                self.check_updates_button.setEnabled(True)
-                self.check_updates_button.setText("Check Now")
+    def _on_update_check_done(self, result) -> None:
+        """Handle the result from the update check worker thread."""
+        from datetime import UTC, datetime
 
         try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(_do_check())
-        except RuntimeError:
-            asyncio.run(_do_check())
+            now = datetime.now(UTC).isoformat(timespec="seconds")
+            self.context.settings.set("updates.last_checked", now)
+            self.updates_status_label.setText(now)
+
+            if result.update_available:
+                info = result.update_info
+                self._pending_update_info = info
+                self.updates_version_label.setText(result.latest_version)
+                self.download_updates_button.setVisible(True)
+                self.download_updates_button.setEnabled(True)
+                message = f"A new version {result.latest_version} is available!"
+                if info and info.release_notes:
+                    message += f"\n\nRelease notes:\n{info.release_notes}"
+                QMessageBox.information(self, "Update Available", message)
+            elif result.error:
+                self.updates_version_label.setText("")
+                QMessageBox.warning(
+                    self, "Check for Updates", f"Error: {result.error}"
+                )
+            else:
+                self.updates_version_label.setText("")
+                QMessageBox.information(
+                    self,
+                    "Check for Updates",
+                    f"You are running the latest version ({__version__}).",
+                )
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Check for Updates", f"Failed to check for updates: {exc}"
+            )
+        finally:
+            self.check_updates_button.setEnabled(True)
+            self.check_updates_button.setText("Check Now")
 
     def _download_update(self) -> None:
-        """Download the update asynchronously."""
+        """Download the update using a background thread."""
         if not self._pending_update_info:
             return
 
@@ -326,50 +359,43 @@ class SettingsPage(Page):
         self.updates_progress.setValue(0)
         self.updates_progress_label.setText("Starting download…")
 
-        from magnetoclip.services.updates import UpdateDownloader
+        self._download_worker = _UpdateDownloadWorker(self._pending_update_info, self)
+        self._download_worker.progress.connect(self._on_download_progress)
+        self._download_worker.finished.connect(self._on_download_done)
+        self._download_worker.start()
 
-        downloader = UpdateDownloader()
+    def _on_download_progress(self, progress) -> None:
+        """Handle progress updates from the download worker."""
+        self.updates_progress.setValue(int(progress.percent))
+        if progress.total_bytes > 0:
+            downloaded_mb = progress.bytes_downloaded / (1024 * 1024)
+            total_mb = progress.total_bytes / (1024 * 1024)
+            self.updates_progress_label.setText(
+                f"{downloaded_mb:.1f} MB / {total_mb:.1f} MB"
+            )
 
-        def _on_progress(progress) -> None:
-            self.updates_progress.setValue(int(progress.percent))
-            if progress.total_bytes > 0:
-                downloaded_mb = progress.bytes_downloaded / (1024 * 1024)
-                total_mb = progress.total_bytes / (1024 * 1024)
-                self.updates_progress_label.setText(
-                    f"{downloaded_mb:.1f} MB / {total_mb:.1f} MB"
-                )
-
-        async def _do_download() -> None:
-            try:
-                result = await downloader.download(
-                    self._pending_update_info,
-                    on_progress=_on_progress,
-                )
-                if result:
-                    self._downloaded_installer = result
-                    self.install_updates_button.setVisible(True)
-                    self.install_updates_button.setEnabled(True)
-                    self.updates_progress_label.setText("Download complete!")
-                    QMessageBox.information(
-                        self,
-                        "Download Complete",
-                        "Update downloaded successfully. Click 'Install' to proceed.",
-                    )
-                else:
-                    self.updates_progress_label.setText("Download cancelled or failed.")
-            except Exception as exc:
-                self.updates_progress_label.setText(f"Error: {exc}")
-            finally:
-                self.download_updates_button.setEnabled(True)
-                self.download_updates_button.setText("Download")
-                self.check_updates_button.setEnabled(True)
-                self.updates_progress.setVisible(False)
-
+    def _on_download_done(self, result) -> None:
+        """Handle the result from the download worker thread."""
         try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(_do_download())
-        except RuntimeError:
-            asyncio.run(_do_download())
+            if result:
+                self._downloaded_installer = str(result)
+                self.install_updates_button.setVisible(True)
+                self.install_updates_button.setEnabled(True)
+                self.updates_progress_label.setText("Download complete!")
+                QMessageBox.information(
+                    self,
+                    "Download Complete",
+                    "Update downloaded successfully. Click 'Install' to proceed.",
+                )
+            else:
+                self.updates_progress_label.setText("Download cancelled or failed.")
+        except Exception as exc:
+            self.updates_progress_label.setText(f"Error: {exc}")
+        finally:
+            self.download_updates_button.setEnabled(True)
+            self.download_updates_button.setText("Download")
+            self.check_updates_button.setEnabled(True)
+            self.updates_progress.setVisible(False)
 
     def _install_update(self) -> None:
         """Launch the update installer."""

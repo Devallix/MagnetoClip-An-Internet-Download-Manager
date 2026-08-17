@@ -81,7 +81,54 @@ def main(argv: Sequence[str] | None = None) -> int:
         log.info("main_window_shown")
 
         if context.settings.get("updates.check_enabled", True):
-            loop.create_task(_check_updates_background(context))
+            from PySide6.QtCore import QThread, Signal
+
+            class _BackgroundUpdateCheck(QThread):
+                """Background thread for startup update check."""
+
+                finished = Signal(object)
+
+                def __init__(self) -> None:
+                    super().__init__()
+
+                def run(self) -> None:
+                    from magnetoclip.services.updates import UpdateChecker
+
+                    endpoint = context.settings.get("updates.endpoint", "")
+                    if not endpoint:
+                        self.finished.emit(None)
+                        return
+                    checker = UpdateChecker(endpoint)
+                    result = checker.check_sync(__version__)
+                    self.finished.emit(result)
+
+            def _on_background_check_done(result) -> None:
+                if result is None:
+                    return
+                from datetime import UTC, datetime
+
+                now = datetime.now(UTC).isoformat(timespec="seconds")
+                context.settings.set("updates.last_checked", now)
+
+                if result.update_available:
+                    log.info(
+                        "update_available",
+                        current=__version__,
+                        latest=result.latest_version,
+                    )
+                    context.events.post(Events.UPDATE_AVAILABLE, {
+                        "current_version": __version__,
+                        "latest_version": result.latest_version,
+                        "update_info": result.update_info,
+                    })
+                else:
+                    log.info("no_update_available", version=__version__)
+
+            _bg_worker = _BackgroundUpdateCheck()
+            _bg_worker.finished.connect(_on_background_check_done)
+            _bg_worker.start()
+            # prevent garbage collection
+            context._bg_update_worker = _bg_worker
 
         try:
             while window.isVisible():
@@ -97,40 +144,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     lock.unlock()
     log.info("application_stopped")
     return 0
-
-
-async def _check_updates_background(context) -> None:
-    """Check for updates in the background without blocking the UI."""
-    from datetime import UTC, datetime
-
-    from magnetoclip.core.events.bus import Events
-    from magnetoclip.services.updates import UpdateChecker
-
-    endpoint = context.settings.get("updates.endpoint", "")
-    if not endpoint:
-        return
-
-    checker = UpdateChecker(endpoint)
-    try:
-        result = await checker.check(__version__)
-        now = datetime.now(UTC).isoformat(timespec="seconds")
-        context.settings.set("updates.last_checked", now)
-
-        if result.update_available:
-            log.info(
-                "update_available",
-                current=__version__,
-                latest=result.latest_version,
-            )
-            context.events.post(Events.UPDATE_AVAILABLE, {
-                "current_version": __version__,
-                "latest_version": result.latest_version,
-                "update_info": result.update_info,
-            })
-        else:
-            log.info("no_update_available", version=__version__)
-    except Exception:
-        log.warning("background_update_check_failed", exc_info=True)
 
 
 def _browser_host_main(argv: Sequence[str]) -> int:
