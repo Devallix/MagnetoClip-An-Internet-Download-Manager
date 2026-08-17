@@ -35,6 +35,7 @@ class Notifier:
         body = str(payload.get("body") or "")
         kind = payload.get("kind")
         download_id = payload.get("download_id")
+        action = payload.get("action")
         log.info("notification", kind=kind, title=title)
         if kind == "completed":
             self._play_completion_sound()
@@ -42,7 +43,7 @@ class Notifier:
         if tray is None or not getattr(tray, "is_available", lambda: False)():
             return
         try:
-            tray.show_message(title, body, download_id)
+            tray.show_message(title, body, download_id, action)
         except Exception:
             log.exception("notification_failed", title=title)
 

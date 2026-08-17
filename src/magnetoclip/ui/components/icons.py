@@ -19,6 +19,7 @@ _cache: dict[tuple[str, str], QIcon] = {}
 _NAV_FILES = {
     "overview": "home",
     "downloads": "download",
+    "detected": "tag",
     "queue": "list",
     "completed": "checkmark",
     "scheduler": "clock",
@@ -35,6 +36,7 @@ _TOOL_FILES = {
     "start": "play",
     "pause": "pause",
     "remove": "trash",
+    "select_all": "checkmark",
 }
 
 _TYPE_FILES = {

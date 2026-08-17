@@ -18,6 +18,8 @@ class SystemTray:
         self.context = context
         self._available = QSystemTrayIcon.isSystemTrayAvailable()
         self._message_download_id: int | None = None
+        self._message_action: str | None = None
+        self._action_callbacks: dict[str, callable] = {}
         self._icon = QSystemTrayIcon(parent)
         self._icon.setIcon(app_icon())
         self._icon.setToolTip("MagnetoClip")
@@ -56,14 +58,33 @@ class SystemTray:
         if self._available:
             self._icon.setToolTip(f"MagnetoClip — {active} active · {speed_text}")
 
-    def show_message(self, title: str, body: str, download_id: int | None = None) -> None:
+    def show_message(
+        self,
+        title: str,
+        body: str,
+        download_id: int | None = None,
+        action: str | None = None,
+    ) -> None:
         if self._available:
             self._message_download_id = download_id
+            self._message_action = action
             self._icon.showMessage(title, body, QSystemTrayIcon.Information, 6000)
 
+    def register_action(self, action: str, callback) -> None:
+        self._action_callbacks[action] = callback
+
     def _on_message_clicked(self) -> None:
+        action = self._message_action
         download_id = self._message_download_id
+        self._message_action = None
         self._message_download_id = None
+        if action is not None:
+            callback = self._action_callbacks.get(action)
+            if callback is not None:
+                callback()
+                return
+            self._open_window()
+            return
         if download_id is None:
             return
         manager = getattr(self.context, "manager", None)

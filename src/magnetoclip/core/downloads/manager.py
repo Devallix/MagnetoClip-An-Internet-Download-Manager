@@ -12,9 +12,10 @@ Responsibilities:
 from __future__ import annotations
 
 import asyncio
+import re
 import threading
 import time
-from datetime import UTC
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -119,12 +120,18 @@ class DownloadManager:
         auth_username: str | None = None,
         auth_password: str | None = None,
         cookies: dict[str, str] | None = None,
+        data: bytes | None = None,
     ) -> Download:
-        """Validate the URL and persist a new download record."""
-        self._validate_url(url)
-        name = sanitize_filename(filename) if filename else sanitize_filename(
-            url.rsplit("/", 1)[-1] or "download"
-        )
+        """Validate the URL and persist a new download record.
+
+        ``data`` lets a capture hand over in-memory bytes (e.g. a Telegram
+        ``blob:`` image the extension fetched for us). When set, no network
+        request happens: the bytes are written straight to disk and the record
+        is created as completed. The URL may then be a ``blob:`` URI.
+        """
+        if data is None:
+            self._validate_url(url)
+        name = sanitize_filename(filename) if filename else self._derive_name(url)
         category = None
         if category_name:
             category = self.categories.get_by_name(category_name)
@@ -148,6 +155,9 @@ class DownloadManager:
             proxy_profile_id = int(
                 self.settings.get("network.default_proxy_id", 0) or 0
             ) or None
+        if data is not None:
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            final_path.write_bytes(data)
         with self.session_factory() as session:
             repo = DownloadRepository(session)
             download = repo.add(
@@ -164,6 +174,11 @@ class DownloadManager:
                 proxy_profile_id=proxy_profile_id,
                 auth_ref=auth_ref,
             )
+            if data is not None:
+                download.status = DownloadStatus.completed
+                download.size_total = len(data)
+                download.size_downloaded = len(data)
+                download.completed_at = datetime.now(UTC)
             from ...media.detect import detect_type
 
             if stream_kind:
@@ -182,7 +197,11 @@ class DownloadManager:
             download = DownloadRepository(session).get(download_id)
         if download is None:
             return False
-        if download.status in ACTIVE_STATUSES or download_id in self._tasks:
+        if (
+            download.status in ACTIVE_STATUSES
+            or download_id in self._tasks
+            or download.status == DownloadStatus.completed
+        ):
             return False
 
         if is_streaming_url(download.url):
@@ -233,6 +252,10 @@ class DownloadManager:
 
     def resume(self, download_id: int) -> None:
         if download_id in self._stream_cancel:
+            # A streaming download is still winding down from pause (the yt-dlp
+            # thread has not yet observed the cancel event). Restarting now
+            # races the task teardown, so retry once it has fully stopped.
+            self._schedule_stream_restart(download_id)
             return
         task = self.core.get(download_id)
         if task is not None:
@@ -240,6 +263,22 @@ class DownloadManager:
             self._update_db_status(download_id, DownloadStatus.downloading)
         else:
             self.start(download_id)
+
+    def _schedule_stream_restart(self, download_id: int) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def _retry() -> None:
+            while (
+                download_id in self._stream_cancel
+                or download_id in self._tasks
+            ):
+                await asyncio.sleep(0.1)
+            self.start(download_id)
+
+        loop.create_task(_retry())
 
     def cancel(self, download_id: int, *, remove_file: bool = False) -> None:
         if download_id in self._stream_cancel:
@@ -367,7 +406,14 @@ class DownloadManager:
                     if download is None:
                         return
                     url = download.url
-                    save_dir = Path(download.save_path).parent
+                    existing_path = (
+                        Path(download.save_path) if download.save_path else None
+                    )
+                    save_dir = (
+                        existing_path.parent
+                        if existing_path is not None
+                        else Path(self.settings.get("downloads.default_directory", ""))
+                    )
                     save_dir.mkdir(parents=True, exist_ok=True)
                     cookies = self._stream_cookies(download)
                 quality = str(
@@ -378,20 +424,47 @@ class DownloadManager:
                     Events.DOWNLOAD_STATE_CHANGED,
                     {"id": download_id, "state": "connecting"},
                 )
-                info = await asyncio.to_thread(
-                    resolve_stream, url, quality, cookies=cookies
+
+                # Resume: when a previous run left a partial file behind, reuse
+                # the stored filename so yt-dlp continues appending to the same
+                # ``.part`` file instead of re-resolving the stream title (which
+                # could change) and starting the download over. Merged/DASH
+                # downloads leave per-format intermediates such as
+                # ``name.f137.mp4.part``/``name.f140.m4a.part`` (and no plain
+                # ``name.part``), so the glob below covers every yt-dlp part
+                # shape (single ``.part``, old ``.partN``, ``.part-FragN`` and
+                # per-format ``.fXXX`` parts).
+                partial = existing_path is not None and (
+                    existing_path.exists()
+                    or any(
+                        True
+                        for pattern in (
+                            existing_path.name + ".part*",
+                            existing_path.name + "*.part",
+                        )
+                        for _ in existing_path.parent.glob(pattern)
+                    )
                 )
+                if partial:
+                    info = None
+                    filename = existing_path.name
+                else:
+                    info = await asyncio.to_thread(
+                        resolve_stream, url, quality, cookies=cookies
+                    )
+                    filename = f"{info.title}.{info.ext}"
 
                 with self.session_factory() as session:
                     repo = DownloadRepository(session)
                     download = repo.get(download_id)
                     if download is None:
                         return
-                    download.filename = f"{info.title}.{info.ext}"
-                    download.save_path = str(save_dir / f"{info.title}.{info.ext}")
-                    download.detected_type = info.media_type
-                    if info.size:
-                        download.size_total = info.size
+                    download.filename = filename
+                    download.save_path = str(save_dir / filename)
+                    if info is not None:
+                        download.detected_type = info.media_type
+                        if info.size:
+                            download.size_total = info.size
                     session.commit()
 
                 self.events.post(
@@ -407,6 +480,7 @@ class DownloadManager:
                     self._make_stream_progress(download_id),
                     cancel_event,
                     cookies=cookies,
+                    filename=filename,
                 )
 
                 self._finalize_stream(download_id, "completed", final_path)
@@ -809,17 +883,14 @@ class DownloadManager:
         if download is None or not download.save_path:
             return
         final = Path(download.save_path)
-        suffixes = [".mclip", ".part", ".ytdl"] + [
-            f".part{i}" for i in range(10)
-        ]
-        for suffix in suffixes:
+        for suffix in (".mclip", ".part", ".ytdl"):
             try:
                 Path(f"{final}{suffix}").unlink(missing_ok=True)
             except OSError:
                 pass
         try:
-            for frag in final.parent.glob(f"{final.name}.part-*"):
-                frag.unlink(missing_ok=True)
+            for part in final.parent.glob(f"{final.name}.part*"):
+                part.unlink(missing_ok=True)
         except OSError:
             pass
 
@@ -837,6 +908,25 @@ class DownloadManager:
             raise ValueError("invalid URL") from exc
         if parsed.scheme not in ("http", "https") or not parsed.host:
             raise ValueError("only http/https URLs are supported")
+
+    @staticmethod
+    def _derive_name(url: str) -> str:
+        """Derive a download filename from a URL.
+
+        The query string is dropped so CDN URLs with huge ``_nc_*``/``stp``
+        parameters (Facebook, Telegram) do not turn into absurdly long
+        filenames. Extensionless CDN URLs that declare their format as a query
+        parameter (``pbs.twimg.com/media/x?format=jpg``) keep a useful
+        extension.
+        """
+        segment = (url or "").rsplit("/", 1)[-1]
+        path_part = segment.split("?", 1)[0].split("#", 1)[0] or "download"
+        if "." in path_part:
+            return path_part
+        match = re.search(r"[?&]format=([a-z0-9]{2,8})", segment, re.IGNORECASE)
+        if match:
+            return f"{path_part}.{match.group(1).lower()}"
+        return path_part
 
     def _resolve_save_dir(self, save_dir: Path | str | None, category: Any) -> Path:
         if save_dir is not None:

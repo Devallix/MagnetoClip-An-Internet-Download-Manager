@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from .models import (
     BrowserDetection,
+    BrowserRequest,
     Category,
     Download,
     DownloadStatus,
@@ -362,6 +363,8 @@ class PendingCaptureRepository:
         source: str | None = None,
         detected_type: str | None = None,
         cookies: dict[str, str] | None = None,
+        data_base64: str | None = None,
+        status: str = "pending",
     ) -> PendingCapture:
         capture = PendingCapture(
             url=url,
@@ -370,7 +373,8 @@ class PendingCaptureRepository:
             source=source,
             detected_type=detected_type,
             cookies_json=cookies or None,
-            status="pending",
+            data_base64=data_base64,
+            status=status,
         )
         self.session.add(capture)
         self.session.commit()
@@ -469,6 +473,135 @@ class BrowserDetectionRepository:
         if detection is not None:
             detection.notified = True
             self.session.commit()
+
+    def list_detections(self, limit: int = 500) -> list[BrowserDetection]:
+        return list(
+            self.session.scalars(
+                select(BrowserDetection)
+                .order_by(BrowserDetection.created_at.desc())
+                .limit(limit)
+            ).all()
+        )
+
+    def remove(self, detection_id: int) -> None:
+        detection = self.session.get(BrowserDetection, detection_id)
+        if detection is not None:
+            self.session.delete(detection)
+            self.session.commit()
+
+    def remove_file_everywhere(self, url: str) -> None:
+        """Drop *url* from every detection; delete detections left empty.
+
+        The page shows each URL once even when several pages reference it, so
+        removing a listed file must clear it from all detections.
+        """
+        changed = False
+        for detection in self.session.scalars(select(BrowserDetection)).all():
+            files = [
+                f
+                for f in (detection.files_json or [])
+                if str(f.get("url") or "") != url
+            ]
+            if files:
+                if len(files) != len(detection.files_json or []):
+                    detection.files_json = files
+                    detection.count = len(files)
+                    changed = True
+            else:
+                self.session.delete(detection)
+                changed = True
+        if changed:
+            self.session.commit()
+
+
+class BrowserRequestRepository:
+    """Data-access operations for app->browser requests (e.g. ``blob:`` fetches)."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def add(
+        self,
+        request_type: str,
+        *,
+        payload: dict[str, Any] | None = None,
+    ) -> BrowserRequest:
+        request = BrowserRequest(type=request_type, payload_json=payload)
+        self.session.add(request)
+        self.session.commit()
+        self.session.refresh(request)
+        return request
+
+    def get(self, request_id: int) -> Optional[BrowserRequest]:
+        return self.session.get(BrowserRequest, request_id)
+
+    def next_queued(self) -> Optional[BrowserRequest]:
+        """Claim and mark as sent the oldest queued request (host writer)."""
+        request = self.session.scalars(
+            select(BrowserRequest)
+            .where(BrowserRequest.status == "queued")
+            .order_by(BrowserRequest.created_at.asc(), BrowserRequest.id.asc())
+            .limit(1)
+        ).first()
+        if request is None:
+            return None
+        request.status = "sent"
+        self.session.commit()
+        return request
+
+    def resolve_data(
+        self,
+        request_id: int,
+        *,
+        data_base64: str,
+        meta: dict[str, Any] | None = None,
+    ) -> bool:
+        request = self.session.get(BrowserRequest, request_id)
+        if request is None:
+            return False
+        request.status = "ready"
+        request.data_base64 = data_base64
+        request.result_json = meta or {}
+        self.session.commit()
+        return True
+
+    def mark_error(self, request_id: int, message: str) -> bool:
+        request = self.session.get(BrowserRequest, request_id)
+        if request is None:
+            return False
+        request.status = "error"
+        request.result_json = {"message": message}
+        self.session.commit()
+        return True
+
+    def mark_expired(self, request_id: int) -> bool:
+        request = self.session.get(BrowserRequest, request_id)
+        if request is None:
+            return False
+        if request.status in ("queued", "sent"):
+            request.status = "expired"
+            request.result_json = {"message": "timed out"}
+            self.session.commit()
+        return True
+
+    def expire_stale(self, max_age_seconds: int = 60) -> int:
+        from datetime import datetime, timedelta, timezone
+
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
+        stale = list(
+            self.session.scalars(
+                select(BrowserRequest).where(
+                    BrowserRequest.status.in_(("queued", "sent")),
+                    BrowserRequest.created_at < cutoff,
+                )
+            ).all()
+        )
+        for request in stale:
+            request.status = "expired"
+            request.result_json = {"message": "timed out"}
+        if stale:
+            self.session.commit()
+        return len(stale)
 
 
 class SettingsStore:

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import io
+import threading
+import time
 
 import pytest
 
@@ -13,6 +15,24 @@ from magnetoclip.browser.native_messaging.protocol import (
     read_message,
     write_message,
 )
+
+
+class _GatedInput(io.RawIOBase):
+    """Input that withholds bytes until ``gate`` is set, so the outbound
+    writer thread gets a chance to poll before the host drains stdin."""
+
+    def __init__(self, data: bytes, gate: threading.Event) -> None:
+        super().__init__()
+        self._data = io.BytesIO(data)
+        self._gate = gate
+
+    def readable(self) -> bool:
+        return True
+
+    def read(self, size: int = -1) -> bytes:
+        while not self._gate.is_set():
+            time.sleep(0.01)
+        return self._data.read(size)
 
 
 def test_message_round_trip():
@@ -81,3 +101,66 @@ def test_run_host_handler_exception_returns_error():
     response = read_message(outputs)
     assert response["type"] == "error"
     assert "boom" in response["message"]
+
+
+def test_run_host_forwards_outbound_messages():
+    queued = [
+        {"type": "fetch_blob", "request_id": 1, "url": "blob:https://x/y"},
+        {"type": "fetch_blob", "request_id": 2, "url": "blob:https://x/z"},
+    ]
+    gate = threading.Event()
+
+    def outbound():
+        item = queued.pop(0) if queued else None
+        if item is not None and not queued:
+            gate.set()  # writer drained the queue; now let the reader run
+        return item
+
+    inputs = _GatedInput(
+        encode_message({"type": "ping"})
+        + encode_message({"type": "ping"}),
+        gate,
+    )
+    outputs = io.BytesIO()
+    code = run_host(
+        lambda msg: {"ok": True},
+        inputs,
+        outputs,
+        outbound=outbound,
+        outbound_interval=0.02,
+    )
+    assert code == 0
+
+    outputs.seek(0)
+    sent = []
+    while True:
+        message = read_message(outputs)
+        if message is None:
+            break
+        sent.append(message)
+    outbound_messages = [m for m in sent if m.get("type") == "fetch_blob"]
+    assert outbound_messages == [
+        {"type": "fetch_blob", "request_id": 1, "url": "blob:https://x/y"},
+        {"type": "fetch_blob", "request_id": 2, "url": "blob:https://x/z"},
+    ]
+    assert len(sent) == 4  # 2 responses + 2 outbound
+
+
+def test_run_host_survives_outbound_exceptions():
+    calls = []
+
+    def outbound():
+        calls.append(1)
+        raise RuntimeError("boom")
+
+    inputs = io.BytesIO(encode_message({"type": "ping"}))
+    outputs = io.BytesIO()
+    code = run_host(
+        lambda msg: {"ok": True},
+        inputs,
+        outputs,
+        outbound=outbound,
+        outbound_interval=0.02,
+    )
+    assert code == 0
+    assert calls  # the writer thread polled at least once without crashing

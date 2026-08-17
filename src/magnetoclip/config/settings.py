@@ -29,6 +29,7 @@ DEFAULTS: dict[str, Any] = {
     "browser.default_downloader": False,
     "browser.confirm_capture": True,
     "browser.notify_downloadable": True,
+    "browser.skip_all_until": "",
     # Scheduler
     "scheduler.enabled": False,
     # Appearance
@@ -39,6 +40,11 @@ DEFAULTS: dict[str, Any] = {
     # Advanced
     "advanced.log_level": "info",
     "advanced.experimental": False,
+    # Updates
+    "updates.check_enabled": True,
+    "updates.endpoint": "https://releases.magnetoclip.dev/manifest.json",
+    "updates.last_checked": "",
+    "updates.last_version": "",
 }
 
 
@@ -62,6 +68,13 @@ class Settings:
     def set(self, key: str, value: Any) -> None:
         if key in self._values:
             self._values[key] = value
+
+    def merge(self, values: dict[str, Any] | None) -> None:
+        """Apply stored overrides in place, ignoring unknown keys."""
+        if values:
+            self._values.update(
+                {k: v for k, v in values.items() if k in DEFAULTS}
+            )
 
     def keys(self) -> list[str]:
         return list(self._values)

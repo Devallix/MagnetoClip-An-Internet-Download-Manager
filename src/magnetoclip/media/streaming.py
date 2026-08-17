@@ -279,6 +279,7 @@ def download_stream(
     cancel_event: threading.Event | None = None,
     timeout: float = 20.0,
     cookies=None,
+    filename: str | None = None,
 ) -> Path:
     """Download *url* into *save_dir*, returning the final file path.
 
@@ -286,6 +287,9 @@ def download_stream(
     *cancel_event* is set at any point the download is aborted and the partial
     file is removed. *cookies* (dict or header string) are written to a
     temporary Netscape cookie file so browser-authenticated sources resolve.
+    When *filename* is given it is used verbatim as the output path (instead of
+    a title-derived template), which lets a paused download continue appending
+    to its existing ``.part`` file.
     """
     from yt_dlp import YoutubeDL
 
@@ -295,7 +299,10 @@ def download_stream(
     # back to bestaudio/best for audio-only sources.
     selector = _build_format_selector(quality, "video")
 
-    outtmpl = str(save_dir / "%(title)s.%(ext)s")
+    if filename:
+        outtmpl = str(save_dir / filename)
+    else:
+        outtmpl = str(save_dir / "%(title)s.%(ext)s")
 
     hooks = []
 

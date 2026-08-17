@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
+import httpx
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -17,6 +18,8 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QVBoxLayout,
 )
+
+from magnetoclip.media.streaming import is_audio_platform, is_streaming_url
 
 
 class AddUrlDialog(QDialog):
@@ -34,6 +37,21 @@ class AddUrlDialog(QDialog):
         self.url_edit.setPlaceholderText("https://example.com/file.zip")
         self.url_edit.textChanged.connect(self._on_url_changed)
         layout.addWidget(self.url_edit)
+
+        self.blob_hint = QLabel(
+            "blob: URLs (image/video addresses copied from a page) are fetched "
+            "from the browser with the MagnetoClip extension."
+        )
+        self.blob_hint.setWordWrap(True)
+        self.blob_hint.setObjectName("muted")
+        self.blob_hint.setVisible(False)
+        layout.addWidget(self.blob_hint)
+
+        self.error_label = QLabel("")
+        self.error_label.setWordWrap(True)
+        self.error_label.setStyleSheet("color: #d44;")
+        self.error_label.setVisible(False)
+        layout.addWidget(self.error_label)
 
         layout.addWidget(QLabel("Filename (optional)"))
         self.filename_edit = QLineEdit()
@@ -118,26 +136,66 @@ class AddUrlDialog(QDialog):
         self.url_edit.returnPressed.connect(self._accept)
 
     def _accept(self) -> None:
-        if not self.url_edit.text().strip():
+        url = self.url_edit.text().strip()
+        if not url:
+            self.url_edit.setFocus()
+            return
+        error = self._url_error(url)
+        if error:
+            self.error_label.setText(error)
+            self.error_label.setVisible(True)
             self.url_edit.setFocus()
             return
         self.accept()
 
+    @staticmethod
+    def _url_error(url: str) -> str | None:
+        """Return a friendly message for URLs MagnetoClip cannot download."""
+        if url.lower().startswith("blob:"):
+            # blob: URLs only exist inside a browser page; MagnetoClip asks the
+            # extension to fetch the bytes from the page that created them.
+            return None
+        try:
+            parsed = httpx.URL(url)
+        except Exception:
+            return "That doesn't look like a valid URL."
+        if parsed.scheme not in ("http", "https") or not parsed.host:
+            return "Only http://, https:// and blob: URLs are supported."
+        return None
+
     def _on_url_changed(self, text: str) -> None:
-        """Auto-select a category from the URL's file extension."""
-        basename = Path(urlsplit(text.strip()).path).name
-        extension = Path(basename).suffix.lower().lstrip(".")
-        if not extension:
-            return
+        """Auto-select a category from the URL."""
+        self.error_label.setVisible(False)
+        self.blob_hint.setVisible(text.strip().lower().startswith("blob:"))
         categories = getattr(self.context, "categories", None)
         if categories is None or not hasattr(categories, "classify"):
             return
-        category = categories.classify(filename=basename, url=text.strip())
-        if category is None:
+        url = text.strip()
+        if not url:
             return
-        index = self.category_combo.findText(category.name)
-        if index >= 0:
-            self.category_combo.setCurrentIndex(index)
+        name: str | None = None
+        if is_streaming_url(url):
+            # Streaming platforms resolve to video/audio media, never to a
+            # plain file, so their category is determined by the host.
+            name = "Music" if is_audio_platform(url) else "Videos"
+        else:
+            basename = Path(urlsplit(url).path).name
+            extension = Path(basename).suffix.lower().lstrip(".")
+            if not extension:
+                # Extensionless URLs often carry the format in the query, e.g.
+                # ``?format=jpg`` (Twitter image CDN).
+                fmt = (parse_qs(urlsplit(url).query).get("format") or [""])[0]
+                if fmt:
+                    extension = fmt.lower().lstrip(".")
+                    basename = f"{basename or 'file'}.{extension}"
+            if basename:
+                category = categories.classify(filename=basename, url=url)
+                if category is not None:
+                    name = category.name
+        if name:
+            index = self.category_combo.findText(name)
+            if index >= 0:
+                self.category_combo.setCurrentIndex(index)
 
     def _browse(self) -> None:
         directory = QFileDialog.getExistingDirectory(

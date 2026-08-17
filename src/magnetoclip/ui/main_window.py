@@ -36,6 +36,7 @@ from .dialogs.about import show_about
 from .pages import (
     AnalyticsPage,
     BrowserPage,
+    DetectedPage,
     DownloadsPage,
     OverviewPage,
     QueuePage,
@@ -52,6 +53,7 @@ TERMINAL_STATUSES = {"completed", "failed", "verification_failed", "stopped"}
 NAV_ITEMS = [
     ("overview", "Overview"),
     ("downloads", "Downloads"),
+    ("detected", "Detected"),
     ("queue", "Queue"),
     ("completed", "Completed"),
     ("scheduler", "Scheduler"),
@@ -132,9 +134,11 @@ class MainWindow(QMainWindow):
         events.connect(Events.DOWNLOAD_ADDED, self._on_download_event)
         events.connect(Events.DOWNLOAD_REMOVED, self._on_download_event)
         events.connect(Events.DOWNLOAD_UPDATED, self._on_download_event)
+        events.connect(Events.UPDATE_AVAILABLE, self._on_update_available)
 
         self.tray = SystemTray(context, parent=self)
         self.tray.set_open_callback(self.show)
+        self.tray.register_action("detected", self._open_detected)
         self.tray.show()
         notifier = getattr(context, "notifier", None)
         if notifier is not None:
@@ -274,6 +278,7 @@ class MainWindow(QMainWindow):
         builders = {
             "Overview": lambda: OverviewPage(context),
             "Downloads": lambda: DownloadsPage(context),
+            "Detected": lambda: DetectedPage(context),
             "Queue": lambda: QueuePage(context),
             "Completed": lambda: DownloadsPage(context, completed_only=True),
             "Scheduler": lambda: SchedulerPage(context),
@@ -339,6 +344,16 @@ class MainWindow(QMainWindow):
         self._fade_animation = animation
 
     # ----- navigation -----
+
+    def _open_detected(self) -> None:
+        """Handle a tray notification click for detected files."""
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self._activate_nav("detected")
+        watcher = getattr(self, "_capture_watcher", None)
+        if watcher is not None:
+            watcher.poll()
 
     def _activate(self, name: str) -> None:
         """Activate a page by nav name (public surface used by tests)."""
@@ -432,6 +447,31 @@ class MainWindow(QMainWindow):
             self._speeds.pop(payload["id"], None)
         self._refresh_stats()
         self._update_speed_label()
+
+    def _on_update_available(self, payload) -> None:
+        """Show notification when an update is available."""
+        from PySide6.QtWidgets import QMessageBox
+
+        if not isinstance(payload, dict):
+            return
+
+        latest_version = payload.get("latest_version", "")
+        update_info = payload.get("update_info")
+
+        message = f"A new version {latest_version} is available!"
+        if update_info and update_info.release_notes:
+            message += f"\n\nRelease notes:\n{update_info.release_notes}"
+
+        reply = QMessageBox.information(
+            self,
+            "Update Available",
+            message + "\n\nWould you like to download it now?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+
+        if reply == QMessageBox.Yes:
+            self._activate_nav("settings")
 
     def _refresh_stats(self) -> None:
         manager = getattr(self.context, "manager", None)

@@ -2,6 +2,7 @@ from sqlalchemy import inspect
 
 from magnetoclip.database.models import DownloadStatus
 from magnetoclip.database.repositories import (
+    BrowserRequestRepository,
     DownloadRepository,
     ScheduleRepository,
     SettingsStore,
@@ -27,6 +28,7 @@ def test_migrations_create_full_schema(tmp_path):
         "verified_runs",
         "pending_captures",
         "browser_detections",
+        "browser_requests",
         "schema_version",
     ):
         assert inspector.has_table(table), f"missing table {table}"
@@ -145,4 +147,48 @@ def test_schedule_update_can_clear_fields(tmp_path):
 
     repo.remove(updated)
     assert repo.get(updated.id) is None
+    db.close()
+
+
+def test_browser_request_repository_lifecycle(tmp_path):
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    repo = BrowserRequestRepository(db.Session())
+
+    request = repo.add(
+        "fetch_blob", payload={"url": "blob:https://web.telegram.org/uuid"}
+    )
+    assert request.id is not None
+    assert request.status == "queued"
+
+    claimed = repo.next_queued()
+    assert claimed.id == request.id
+    assert claimed.status == "sent"
+    assert repo.next_queued() is None
+
+    assert repo.resolve_data(request.id, data_base64="Y2F0", meta={"mime_type": "image/png"})
+    loaded = repo.get(request.id)
+    assert loaded.status == "ready"
+    assert loaded.data_base64 == "Y2F0"
+    assert loaded.result_json["mime_type"] == "image/png"
+    db.close()
+
+
+def test_browser_request_repository_errors_and_expiry(tmp_path):
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    repo = BrowserRequestRepository(db.Session())
+    request = repo.add("fetch_blob", payload={"url": "blob:https://x/y"})
+
+    assert repo.mark_error(request.id, "no page open")
+    assert repo.get(request.id).status == "error"
+    assert repo.get(request.id).result_json["message"] == "no page open"
+
+    second = repo.add("fetch_blob", payload={"url": "blob:https://x/z"})
+    assert repo.mark_expired(second.id)
+    assert repo.get(second.id).status == "expired"
+
+    # Expiring a finished request leaves its state untouched.
+    assert repo.mark_expired(request.id)
+    assert repo.get(request.id).status == "error"
     db.close()

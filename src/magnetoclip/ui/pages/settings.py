@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
+
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -12,12 +15,15 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
+    QProgressBar,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
 )
 
 from magnetoclip.core.events.bus import Events
+from magnetoclip.version import __version__
 
 from ..components.buttons import AccentButton
 from ..dialogs.proxy import ProxyDialog
@@ -90,6 +96,11 @@ class SettingsPage(Page):
         )
         form.addRow("", self.confirm_capture_check)
 
+        self.skip_all_check = QCheckBox(
+            "Skip all detected files without asking (turns the confirmation dialog back on when unchecked)"
+        )
+        form.addRow("", self.skip_all_check)
+
         self.notify_downloadable_check = QCheckBox(
             "Notify me when downloadable files are found on a page"
         )
@@ -115,6 +126,56 @@ class SettingsPage(Page):
         proxy_form.addRow("", manage_proxy_button)
         layout.addLayout(proxy_form)
 
+        updates_label = QLabel("Updates")
+        updates_label.setObjectName("page_subtitle")
+        layout.addWidget(updates_label)
+
+        updates_form = QFormLayout()
+        updates_form.setSpacing(12)
+
+        self.updates_check_enabled = QCheckBox("Check for updates automatically")
+        updates_form.addRow("", self.updates_check_enabled)
+
+        self.updates_endpoint_edit = QLineEdit()
+        updates_form.addRow("Update endpoint", self.updates_endpoint_edit)
+
+        self.updates_status_label = QLabel("")
+        self.updates_status_label.setObjectName("updates_status")
+        updates_form.addRow("Last checked", self.updates_status_label)
+
+        self.updates_version_label = QLabel("")
+        self.updates_version_label.setObjectName("updates_version")
+        updates_form.addRow("Available version", self.updates_version_label)
+
+        self.updates_progress = QProgressBar()
+        self.updates_progress.setVisible(False)
+        updates_form.addRow("Download progress", self.updates_progress)
+
+        self.updates_progress_label = QLabel("")
+        self.updates_progress_label.setVisible(False)
+        updates_form.addRow("", self.updates_progress_label)
+
+        buttons_row = QHBoxLayout()
+        self.check_updates_button = QPushButton("Check Now")
+        self.check_updates_button.clicked.connect(self._check_for_updates)
+        buttons_row.addWidget(self.check_updates_button)
+
+        self.download_updates_button = QPushButton("Download")
+        self.download_updates_button.setVisible(False)
+        self.download_updates_button.clicked.connect(self._download_update)
+        buttons_row.addWidget(self.download_updates_button)
+
+        self.install_updates_button = QPushButton("Install")
+        self.install_updates_button.setVisible(False)
+        self.install_updates_button.clicked.connect(self._install_update)
+        buttons_row.addWidget(self.install_updates_button)
+
+        buttons_row.addStretch(1)
+        updates_form.addRow("", buttons_row)
+        layout.addLayout(updates_form)
+
+        self._pending_update_info = None
+        self._downloaded_installer = None
         layout.addLayout(form)
 
         save_row = QHBoxLayout()
@@ -149,12 +210,23 @@ class SettingsPage(Page):
         self.startup_check.setChecked(bool(s.get("general.startup", True)))
         self.auto_categorize_check.setChecked(bool(s.get("downloads.auto_categorize", True)))
         self.confirm_capture_check.setChecked(bool(s.get("browser.confirm_capture", True)))
+        from magnetoclip.browser.skip import skip_all_active
+
+        self.skip_all_check.setChecked(skip_all_active(self.context))
         self.notify_downloadable_check.setChecked(
             bool(s.get("browser.notify_downloadable", True))
         )
         index = self.streaming_quality_combo.findData(str(s.get("streaming.quality", "best")))
         self.streaming_quality_combo.setCurrentIndex(max(0, index))
         self._load_proxy_combo()
+
+        self.updates_check_enabled.setChecked(bool(s.get("updates.check_enabled", True)))
+        self.updates_endpoint_edit.setText(str(s.get("updates.endpoint", "")))
+        last_checked = str(s.get("updates.last_checked", ""))
+        if last_checked:
+            self.updates_status_label.setText(last_checked)
+        else:
+            self.updates_status_label.setText("Never")
 
     def _browse_directory(self) -> None:
         directory = QFileDialog.getExistingDirectory(self, "Default download folder")
@@ -178,6 +250,166 @@ class SettingsPage(Page):
         dialog.exec()
         self._load_proxy_combo()
 
+    def _check_for_updates(self) -> None:
+        """Check for updates asynchronously."""
+        endpoint = self.updates_endpoint_edit.text().strip()
+        if not endpoint:
+            QMessageBox.warning(self, "Check for Updates", "Please enter an update endpoint URL.")
+            return
+
+        self.check_updates_button.setEnabled(False)
+        self.check_updates_button.setText("Checking…")
+        self.download_updates_button.setVisible(False)
+        self.install_updates_button.setVisible(False)
+        self._pending_update_info = None
+        self._downloaded_installer = None
+
+        from magnetoclip.services.updates import UpdateChecker
+
+        checker = UpdateChecker(endpoint)
+
+        async def _do_check() -> None:
+            try:
+                result = await checker.check(__version__)
+                from datetime import UTC, datetime
+
+                now = datetime.now(UTC).isoformat(timespec="seconds")
+                self.context.settings.set("updates.last_checked", now)
+                self.updates_status_label.setText(now)
+
+                if result.update_available:
+                    info = result.update_info
+                    self._pending_update_info = info
+                    self.updates_version_label.setText(result.latest_version)
+                    self.download_updates_button.setVisible(True)
+                    self.download_updates_button.setEnabled(True)
+                    message = f"A new version {result.latest_version} is available!"
+                    if info and info.release_notes:
+                        message += f"\n\nRelease notes:\n{info.release_notes}"
+                    QMessageBox.information(self, "Update Available", message)
+                elif result.error:
+                    self.updates_version_label.setText("")
+                    QMessageBox.warning(
+                        self, "Check for Updates", f"Error: {result.error}"
+                    )
+                else:
+                    self.updates_version_label.setText("")
+                    QMessageBox.information(
+                        self,
+                        "Check for Updates",
+                        f"You are running the latest version ({__version__}).",
+                    )
+            except Exception as exc:
+                QMessageBox.warning(
+                    self, "Check for Updates", f"Failed to check for updates: {exc}"
+                )
+            finally:
+                self.check_updates_button.setEnabled(True)
+                self.check_updates_button.setText("Check Now")
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_do_check())
+        except RuntimeError:
+            asyncio.run(_do_check())
+
+    def _download_update(self) -> None:
+        """Download the update asynchronously."""
+        if not self._pending_update_info:
+            return
+
+        self.download_updates_button.setEnabled(False)
+        self.download_updates_button.setText("Downloading…")
+        self.check_updates_button.setEnabled(False)
+        self.updates_progress.setVisible(True)
+        self.updates_progress_label.setVisible(True)
+        self.updates_progress.setValue(0)
+        self.updates_progress_label.setText("Starting download…")
+
+        from magnetoclip.services.updates import UpdateDownloader
+
+        downloader = UpdateDownloader()
+
+        def _on_progress(progress) -> None:
+            self.updates_progress.setValue(int(progress.percent))
+            if progress.total_bytes > 0:
+                downloaded_mb = progress.bytes_downloaded / (1024 * 1024)
+                total_mb = progress.total_bytes / (1024 * 1024)
+                self.updates_progress_label.setText(
+                    f"{downloaded_mb:.1f} MB / {total_mb:.1f} MB"
+                )
+
+        async def _do_download() -> None:
+            try:
+                result = await downloader.download(
+                    self._pending_update_info,
+                    on_progress=_on_progress,
+                )
+                if result:
+                    self._downloaded_installer = result
+                    self.install_updates_button.setVisible(True)
+                    self.install_updates_button.setEnabled(True)
+                    self.updates_progress_label.setText("Download complete!")
+                    QMessageBox.information(
+                        self,
+                        "Download Complete",
+                        "Update downloaded successfully. Click 'Install' to proceed.",
+                    )
+                else:
+                    self.updates_progress_label.setText("Download cancelled or failed.")
+            except Exception as exc:
+                self.updates_progress_label.setText(f"Error: {exc}")
+            finally:
+                self.download_updates_button.setEnabled(True)
+                self.download_updates_button.setText("Download")
+                self.check_updates_button.setEnabled(True)
+                self.updates_progress.setVisible(False)
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_do_download())
+        except RuntimeError:
+            asyncio.run(_do_download())
+
+    def _install_update(self) -> None:
+        """Launch the update installer."""
+        if not self._downloaded_installer:
+            return
+
+        installer_path = Path(self._downloaded_installer)
+        if not installer_path.is_file():
+            QMessageBox.warning(
+                self,
+                "Install Update",
+                "The installer file was not found. Please download again.",
+            )
+            self.install_updates_button.setVisible(False)
+            self._downloaded_installer = None
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Install Update",
+            "MagnetoClip will close and the installer will launch.\n\n"
+            "Do you want to proceed?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+
+        if reply == QMessageBox.Yes:
+            from magnetoclip.services.updates import UpdateDownloader
+
+            downloader = UpdateDownloader()
+            if downloader.install(installer_path):
+                self.context.app.quit()
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Install Update",
+                    "Failed to launch the installer. Please run it manually:\n"
+                    f"{installer_path}",
+                )
+
     def save(self) -> None:
         from magnetoclip.database.repositories import SettingsStore
         from magnetoclip.ui.themes import apply_theme
@@ -194,12 +426,21 @@ class SettingsPage(Page):
         s.set("general.startup", self.startup_check.isChecked())
         s.set("downloads.auto_categorize", self.auto_categorize_check.isChecked())
         s.set("browser.confirm_capture", self.confirm_capture_check.isChecked())
+        from magnetoclip.browser.skip import disable_skip_all, enable_skip_all
+
+        if self.skip_all_check.isChecked():
+            enable_skip_all(self.context, duration=None)
+        else:
+            disable_skip_all(self.context)
         s.set("browser.notify_downloadable", self.notify_downloadable_check.isChecked())
         s.set(
             "streaming.quality",
             self.streaming_quality_combo.currentData() or "best",
         )
         s.set("network.default_proxy_id", self.proxy_combo.currentData() or 0)
+
+        s.set("updates.check_enabled", self.updates_check_enabled.isChecked())
+        s.set("updates.endpoint", self.updates_endpoint_edit.text())
 
         store = SettingsStore(self.context.session_factory)
         store.save_many(s.to_store_dict())

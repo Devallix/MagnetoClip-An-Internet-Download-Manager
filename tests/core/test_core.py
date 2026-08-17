@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -259,6 +260,43 @@ def test_add_auto_categorizes_and_sanitizes(tmp_path):
     assert download.category_id is not None
     category = context.categories.get(download.category_id)
     assert category.name == "Documents"
+
+
+def test_add_strips_query_strings_from_derived_names(tmp_path):
+    context = make_context(tmp_path)
+    manager: DownloadManager = context.manager
+    # Facebook-style CDN URLs carry a huge query string that used to become part
+    # of the filename and pushed Windows paths past MAX_PATH (bug report).
+    facebook = (
+        "https://scontent.facc6-1.fna.fbcdn.net/v/t39.99422-6/"
+        "772840093_2002848522768189_5870094313626133451_n.png"
+        "?stp=dst-jpg_p526x296&_nc_cat=110&ccb=1-7&_nc_sid=5f2048"
+        "&_nc_ohc=abc&_nc_ht=scontent&oh=00_AFx&oe=6A83A0ED"
+    )
+    download = manager.add(facebook)
+    assert download.filename == "772840093_2002848522768189_5870094313626133451_n.png"
+    assert "?" not in download.filename
+
+
+def test_add_applies_format_extension_to_extensionless_cdns(tmp_path):
+    context = make_context(tmp_path)
+    manager: DownloadManager = context.manager
+    # Twitter images are extensionless and declare their format in the query.
+    twitter = "https://pbs.twimg.com/media/HPlReWoWQAAmMqB?format=jpg&name=900x900"
+    download = manager.add(twitter)
+    assert download.filename == "HPlReWoWQAAmMqB.jpg"
+
+
+def test_add_data_bytes_completes_immediately(tmp_path):
+    context = make_context(tmp_path)
+    manager: DownloadManager = context.manager
+    blob_url = "blob:https://web.telegram.org/55d2a84a-91c1-4b2e-8a13-0f0e0c2e8f1c"
+    payload = b"\x89PNG\r\n\x1a\n" + bytes(1024)
+    download = manager.add(blob_url, filename="photo.png", data=payload)
+    assert download.status == DownloadStatus.completed
+    assert Path(download.save_path).read_bytes() == payload
+    # Completed records must not be re-scheduled by a stray start() call.
+    assert manager.start(download.id) is False
 
 
 async def test_download_completes(tmp_path):

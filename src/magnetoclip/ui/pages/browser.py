@@ -240,6 +240,11 @@ class BrowserPage(Page):
         self.refresh()
 
     def _on_default_downloader_toggled(self, checked: bool) -> None:
+        if checked:
+            # The extension only runs while the integration is enabled, so
+            # turning MagnetoClip into the default downloader also activates it.
+            self.context.settings.set("browser.integration_enabled", True)
+            self._activate()
         self.context.settings.set("browser.default_downloader", checked)
         self._persist()
         self.refresh()

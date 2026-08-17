@@ -75,11 +75,30 @@ def _migration_004_pending_capture_cookies(engine: Engine) -> None:
             )
 
 
+def _migration_005_pending_capture_data(engine: Engine) -> None:
+    """Add inline data for browser captures (blob: media, e.g. Telegram)."""
+    columns = {column["name"] for column in inspect(engine).get_columns("pending_captures")}
+    with engine.begin() as conn:
+        if "data_base64" not in columns:
+            conn.execute(
+                text("ALTER TABLE pending_captures ADD COLUMN data_base64 TEXT")
+            )
+
+
+def _migration_006_browser_requests(engine: Engine) -> None:
+    """Add the app->browser request table (blob: URL fetches)."""
+    from .models import BrowserRequest
+
+    BrowserRequest.__table__.create(engine, checkfirst=True)
+
+
 MIGRATIONS: list[Migration] = [
     _migration_001_create_all,
     _migration_002_media_columns,
     _migration_003_browser_tables,
     _migration_004_pending_capture_cookies,
+    _migration_005_pending_capture_data,
+    _migration_006_browser_requests,
 ]
 
 

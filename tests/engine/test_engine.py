@@ -11,7 +11,7 @@ from magnetoclip.engine.downloader.engine import (
 )
 from magnetoclip.engine.resume.mclip import MClipState, SegmentState
 
-from tests.support.http_server import PayloadServer, no_range_server
+from tests.support.http_server import PayloadServer, html_server, no_range_server
 
 PAYLOAD = bytes(range(256)) * 4096  # 1 MiB deterministic
 
@@ -124,6 +124,62 @@ async def test_resume_from_partial_state(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_resume_extends_plan_when_file_grew(tmp_path):
+    with PayloadServer(PAYLOAD) as server:
+        core = MagnetoCore()
+        try:
+            spec = _make_spec(server, tmp_path, connections_max=1)
+            # Simulate a previous run that planned for a smaller file (the
+            # server now serves the full PAYLOAD). The tail must be fetched
+            # instead of merging a truncated file.
+            half = len(PAYLOAD) // 2
+            state = MClipState(
+                url=spec.url,
+                file_path=str(spec.final_path),
+                total_size=half,
+                headers={},
+            )
+            state.segments = [
+                SegmentState(index=0, start=0, end=half - 1, written=half),
+            ]
+            state.part_path(0).write_bytes(PAYLOAD[:half])
+
+            task = core.submit(spec, state)
+            result = await task.run()
+            assert result == "completed"
+            assert spec.final_path.read_bytes() == PAYLOAD
+        finally:
+            await core.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_resume_trims_plan_when_file_shrank(tmp_path):
+    with PayloadServer(PAYLOAD) as server:
+        core = MagnetoCore()
+        try:
+            spec = _make_spec(server, tmp_path, connections_max=1)
+            # Simulate a previous run that planned for a larger file; the
+            # server now serves PAYLOAD. The plan must shrink to the new EOF.
+            state = MClipState(
+                url=spec.url,
+                file_path=str(spec.final_path),
+                total_size=len(PAYLOAD) * 2,
+                headers={},
+            )
+            state.segments = [
+                SegmentState(index=0, start=0, end=len(PAYLOAD) * 2 - 1, written=len(PAYLOAD)),
+            ]
+            state.part_path(0).write_bytes(PAYLOAD)
+
+            task = core.submit(spec, state)
+            result = await task.run()
+            assert result == "completed"
+            assert spec.final_path.read_bytes() == PAYLOAD
+        finally:
+            await core.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_pause_resume(tmp_path):
     slow = bytes(range(256)) * 512  # 128 KiB, slow stream
     with PayloadServer(slow, chunk_size=4096, chunk_delay=0.02) as server:
@@ -140,6 +196,41 @@ async def test_pause_resume(tmp_path):
             task.resume()
             await runner
             assert spec.final_path.read_bytes() == slow
+        finally:
+            await core.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_pause_during_connecting_then_resume(tmp_path):
+    with PayloadServer(PAYLOAD) as server:
+        core = MagnetoCore()
+        try:
+            spec = _make_spec(server, tmp_path, connections_max=1)
+            task = core.submit(spec)
+            original = task._analyze_with_retry
+
+            async def analyze_then_pause():
+                info = await original()
+                task.pause()
+                return info
+
+            task._analyze_with_retry = analyze_then_pause
+            runner = asyncio.create_task(task.run())
+
+            deadline = asyncio.get_running_loop().time() + 5
+            while asyncio.get_running_loop().time() < deadline:
+                if task.state.state == "paused" and not task._running.is_set():
+                    break
+                await asyncio.sleep(0.02)
+            # A pause during "connecting" must survive the analysis phase: the
+            # state that follows must still read "paused" so resume() works
+            # instead of leaving the download stuck.
+            assert task.state.state == "paused"
+            assert not task._running.is_set()
+
+            task.resume()
+            await runner
+            assert spec.final_path.read_bytes() == PAYLOAD
         finally:
             await core.shutdown()
 
@@ -229,6 +320,37 @@ async def test_permanent_http_error_fails(tmp_path):
             result = await task.run()
             assert result == "failed"
             assert task.error
+        finally:
+            await core.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_html_error_page_does_not_override_binary(tmp_path):
+    html = b"<html><head><title>Not Found</title></head><body>404</body></html>"
+    with html_server(html) as server:
+        core = MagnetoCore()
+        try:
+            spec = _make_spec(server, tmp_path, filename="out.bin")
+            task = core.submit(spec)
+            result = await task.run()
+            assert result == "failed"
+            assert "HTML" in task.error
+            assert not spec.final_path.exists()
+        finally:
+            await core.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_html_content_saved_when_filename_is_html(tmp_path):
+    html = b"<html><body>hello</body></html>"
+    with html_server(html) as server:
+        core = MagnetoCore()
+        try:
+            spec = _make_spec(server, tmp_path, filename="page.html")
+            task = core.submit(spec)
+            result = await task.run()
+            assert result == "completed"
+            assert spec.final_path.read_bytes() == html
         finally:
             await core.shutdown()
 

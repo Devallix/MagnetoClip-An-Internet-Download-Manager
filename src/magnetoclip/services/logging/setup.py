@@ -47,3 +47,24 @@ def configure_logging(log_dir: Path, *, level: str = "INFO") -> None:
 
 def get_logger(name: str = "magnetoclip") -> structlog.stdlib.BoundLogger:
     return structlog.get_logger(name)
+
+
+def shutdown_logging() -> None:
+    """Close and remove file handlers so the log file is not left locked.
+
+    On Windows an open ``magnetoclip.log`` file handle survives until the
+    process exits, which blocks clean shutdowns, test temp-dir cleanup and
+    app restarts. Call this during shutdown after all modules have logged.
+    """
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if isinstance(handler, logging.FileHandler):
+            try:
+                handler.flush()
+            except Exception:
+                pass
+            try:
+                handler.close()
+            except Exception:
+                pass
+            root.removeHandler(handler)

@@ -10,9 +10,25 @@ _RESERVED_NAMES = {
     *(f"LPT{i}" for i in range(1, 10)),
 }
 
+# Cap the filename so it always fits Windows' MAX_PATH together with the
+# download directory. CDN URLs (Facebook, Telegram, ...) can carry enormous
+# query strings that otherwise turn into absurdly long, unopenable filenames.
+_MAX_NAME_LENGTH = 180
+_MAX_EXTENSION_LENGTH = 10
+
 
 class UnsafePathError(ValueError):
     pass
+
+
+def _cap_length(name: str) -> str:
+    if len(name) <= _MAX_NAME_LENGTH:
+        return name
+    dot = name.rfind(".")
+    if dot > 0 and len(name) - dot - 1 <= _MAX_EXTENSION_LENGTH:
+        ext = name[dot:]
+        return name[:dot][: _MAX_NAME_LENGTH - len(ext)] + ext
+    return name[: _MAX_NAME_LENGTH]
 
 
 def sanitize_filename(name: str) -> str:
@@ -22,6 +38,7 @@ def sanitize_filename(name: str) -> str:
     name = name.strip(" .")
     if not name:
         name = "download"
+    name = _cap_length(name)
     stem = name.split(".")[0].upper()
     if stem in _RESERVED_NAMES:
         name = "_" + name

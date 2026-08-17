@@ -33,6 +33,7 @@ class Events:
     ANALYTICS_REFRESHED = "analytics.refreshed"
     MEDIA_DETECTED = "media.detected"
     NOTIFICATION_REQUESTED = "notification.requested"
+    UPDATE_AVAILABLE = "update.available"
 
 
 class EventBus(QObject):

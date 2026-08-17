@@ -120,6 +120,17 @@
   const MAX_PAGE_SCAN_FILES = 20;
   const MIN_IMAGE_SIZE = 120;
   const TYPE_PRIORITY = { video: 0, audio: 1, image: 2 };
+  // Blob-backed viewers (Telegram Web renders every photo as a blob: URL) can
+  // only be captured by shipping the bytes themselves. A single native
+  // messaging message is capped at ~1MB, so larger blobs are split into base64
+  // chunks and reassembled in MagnetoClip. Small blobs still travel in one
+  // message to avoid the extra round-trips.
+  const BLOB_CHUNK_BYTES = 400 * 1024;
+  const SINGLE_BLOB_MESSAGE_BYTES = 512 * 1024;
+  const MAX_BLOB_CAPTURE_BYTES = 15 * 1024 * 1024;
+  // Tiny image blobs are almost always avatars, emoji or thumbnails; skip them
+  // unless the element reports a meaningful rendered size.
+  const MIN_BLOB_IMAGE_BYTES = 24 * 1024;
 
   // URLs already handed to MagnetoClip during this page session.
   const reportedUrls = new Set();
@@ -215,6 +226,10 @@
       resourceObserver.disconnect();
       resourceObserver = null;
     }
+    if (objectUrlMessageHandler) {
+      window.removeEventListener("message", objectUrlMessageHandler);
+      objectUrlMessageHandler = null;
+    }
   }
 
   // ----- url helpers -----
@@ -267,13 +282,14 @@
     }
     if (host.endsWith("twimg.com")) {
       return (
-        /\/ext_tw_video\/|\/amplify_video\/|\/tweet_video\//.test(path) ||
+        /\/ext_tw_video\/|\/amplify_video\/|\/tweet_video\/|\/media\//.test(path) ||
         MEDIA_EXTS.has(ext)
       );
     }
-    // Telegram serves every uploaded file under /file/ (photos, videos, docs).
+    // Telegram serves every uploaded file under /file/ (photos, videos, docs);
+    // many are extensionless, so a /file/ path is treated as a real file.
     if (host.endsWith("cdn.telegram.org")) {
-      return path.includes("/file/") && MEDIA_EXTS.has(ext);
+      return path.includes("/file/");
     }
     return MEDIA_EXTS.has(ext);
   }
@@ -330,7 +346,13 @@
     try {
       const clean = url.split(/[?#]/)[0];
       const match = /\.([a-z0-9]{2,8})$/i.exec(clean);
-      return match ? match[1].toLowerCase() : "";
+      if (match) {
+        return match[1].toLowerCase();
+      }
+      // Extensionless CDN URLs (Twitter images, Telegram files) declare their
+      // format as a query parameter, e.g. pbs.twimg.com/media/x?format=jpg.
+      const format = /[?&]format=([a-z0-9]{2,8})/i.exec(url);
+      return format ? format[1].toLowerCase() : "";
     } catch (error) {
       return "";
     }
@@ -349,6 +371,17 @@
     const clean = url.split(/[?#]/)[0];
     const name = clean.substring(clean.lastIndexOf("/") + 1);
     if (!name || !name.includes(".")) {
+      // Extensionless CDN URLs carry their real format in the query, so the
+      // filename can still end with a meaningful extension.
+      const ext = extensionOf(url);
+      if (ext && /[?&]format=/.test(url)) {
+        const base = name ? name : "media";
+        try {
+          return decodeURIComponent(base) + "." + ext;
+        } catch (error) {
+          return base + "." + ext;
+        }
+      }
       return "";
     }
     try {
@@ -361,6 +394,229 @@
   function isHttpUrl(url) {
     return /^https?:/i.test(url || "");
   }
+
+  function typeForMime(mime) {
+    const type = String(mime || "").split("/")[0].toLowerCase();
+    return type === "image" || type === "video" || type === "audio" ? type : "file";
+  }
+
+  // ---- blob media capture ----
+
+  // Blob URLs handed to MagnetoClip are useless on their own (the app cannot
+  // fetch them), so the blob is read here and shipped as base64. Only read on
+  // social platforms: on ordinary pages blob images are site chrome (avatars,
+  // generated thumbs) and would trigger noisy capture dialogs.
+  const blobCapturesInFlight = new Set();
+
+  function arrayBufferToBase64(bytes) {
+    let binary = "";
+    const CHUNK = 0x8000;
+    for (let offset = 0; offset < bytes.length; offset += CHUNK) {
+      binary += String.fromCharCode.apply(
+        null,
+        bytes.subarray(offset, offset + CHUNK)
+      );
+    }
+    return btoa(binary);
+  }
+
+  // Awaits a runtime message round-trip; resolves null when the background is
+  // unreachable (extension context gone, native host down).
+  function sendAwait(message) {
+    return new Promise((resolve) => {
+      if (contextGone) {
+        resolve(null);
+        return;
+      }
+      try {
+        const result = chrome.runtime.sendMessage(message);
+        if (result && typeof result.then === "function") {
+          result.then(resolve).catch(() => resolve(null));
+        } else {
+          resolve(result);
+        }
+      } catch (error) {
+        resolve(null);
+      }
+    });
+  }
+
+  // Ship a blob as base64 chunks; returns true when MagnetoClip accepted it.
+  async function sendBlobChunks(captureKey, src, bytes, meta) {
+    const total = Math.max(1, Math.ceil(bytes.length / BLOB_CHUNK_BYTES));
+    for (let index = 0; index < total; index++) {
+      const start = index * BLOB_CHUNK_BYTES;
+      const end = Math.min(start + BLOB_CHUNK_BYTES, bytes.length);
+      const response = await sendAwait({
+        type: "capture_chunk",
+        capture_key: captureKey,
+        index: index,
+        total: total,
+        chunk: arrayBufferToBase64(bytes.subarray(start, end)),
+        url: src,
+        filename: meta.filename || "",
+        mime_type: meta.mime_type || "",
+        detected_type: meta.detected_type || "file",
+        referrer: meta.referrer || location.href,
+        last: index === total - 1,
+      });
+      if (!response || response.type === "capture_chunk_error") {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  async function captureBlobUrl(src, meta) {
+    if (!social || blobCapturesInFlight.has(src)) {
+      return;
+    }
+    if (reportedUrls.has(src)) {
+      return;
+    }
+    blobCapturesInFlight.add(src);
+    try {
+      const response = await fetch(src);
+      if (!response.ok) {
+        return;
+      }
+      const mimeType = response.headers.get("Content-Type") || "";
+      const detectedType = typeForMime(mimeType);
+      if (detectedType === "file") {
+        return;
+      }
+      const buffer = await response.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      if (!bytes.length || bytes.length > MAX_BLOB_CAPTURE_BYTES) {
+        return;
+      }
+      // Only meaningful-size images are offered; tiny blobs are usually
+      // avatars, emoji or thumbnails. Videos/audio skip this filter because
+      // the callers decide with element context.
+      if (detectedType === "image") {
+        const metaSize = meta && meta.width && meta.height;
+        const knownLarge =
+          metaSize &&
+          (meta.width >= MIN_IMAGE_SIZE || meta.height >= MIN_IMAGE_SIZE);
+        if (!knownLarge && bytes.length < MIN_BLOB_IMAGE_BYTES) {
+          return;
+        }
+      }
+      const filename = (meta && meta.filename) || "";
+      const referrer = (meta && meta.referrer) || location.href;
+      if (bytes.length <= SINGLE_BLOB_MESSAGE_BYTES) {
+        safeSend({
+          type: "social_capture",
+          url: referrer,
+          files: [
+            {
+              url: src,
+              filename: filename,
+              detected_type: detectedType,
+              mime_type: mimeType,
+              data_base64: arrayBufferToBase64(bytes),
+            },
+          ],
+        });
+        reportedUrls.add(src);
+        return;
+      }
+      const captureKey =
+        Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
+      const ok = await sendBlobChunks(captureKey, src, bytes, {
+        filename: filename,
+        mime_type: mimeType,
+        detected_type: detectedType,
+        referrer: referrer,
+      });
+      if (ok) {
+        reportedUrls.add(src);
+      }
+    } catch (error) {
+      /* unreadable blobs (MediaSource-backed streams, revoked URLs) are skipped */
+    } finally {
+      blobCapturesInFlight.delete(src);
+    }
+  }
+
+  // Telegram (and similar viewers) create media blobs on the main thread but
+  // may attach them to an element after the fact. A MAIN-world hook (injected
+  // by the background worker, so the page CSP cannot block it) reports every
+  // created object URL here; the byte/mime filters in captureBlobUrl keep the
+  // noise down.
+  let objectUrlMessageHandler = null;
+
+  function installObjectUrlHook() {
+    if (!social || objectUrlMessageHandler) {
+      return;
+    }
+    safeSend({ type: "install_blob_hook" });
+    objectUrlMessageHandler = (event) => {
+      if (event.source !== window || !event.data) {
+        return;
+      }
+      const payload = event.data;
+      if (payload.source !== "magnetoclip-blob") {
+        return;
+      }
+      const url = String(payload.url || "");
+      if (url.startsWith("blob:") && !reportedUrls.has(url)) {
+        captureBlobUrl(url, {});
+      }
+    };
+    window.addEventListener("message", objectUrlMessageHandler);
+  }
+
+  // The app asks the extension to fetch a ``blob:`` URL the user pasted into
+  // the new-download field. Blob URLs only resolve inside the page that created
+  // them, so the background routes the request to a content script on a tab of
+  // the blob's origin and this handler ships the bytes back. Content<->background
+  // messages can carry tens of MB, so one response is fine; the background
+  // splits it into chunks for the native messaging channel.
+  function handleFetchBlob(message, sendResponse) {
+    const url = String((message && message.url) || "");
+    if (!/^blob:/i.test(url)) {
+      sendResponse({ type: "fetch_blob_response", ok: false, message: "Not a blob URL" });
+      return;
+    }
+    fetch(url)
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error("Blob URL is no longer valid");
+        }
+        return response.arrayBuffer().then((buffer) => ({ response: response, buffer: buffer }));
+      })
+      .then(({ response, buffer }) => {
+        const bytes = new Uint8Array(buffer);
+        if (!bytes.length) {
+          throw new Error("Blob is empty");
+        }
+        if (bytes.length > MAX_BLOB_CAPTURE_BYTES) {
+          throw new Error("Blob exceeds the 15 MB capture limit");
+        }
+        sendResponse({
+          type: "fetch_blob_response",
+          ok: true,
+          data_base64: arrayBufferToBase64(bytes),
+          mime_type: response.headers.get("Content-Type") || "",
+        });
+      })
+      .catch((error) => {
+        sendResponse({
+          type: "fetch_blob_response",
+          ok: false,
+          message: String(error && error.message) || "Could not read the blob",
+        });
+      });
+  }
+
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message && message.type === "fetch_blob") {
+      handleFetchBlob(message, sendResponse);
+      return true;
+    }
+    return false;
+  });
 
   function pageTitle() {
     const og = document.querySelector('meta[property="og:title"]');
@@ -439,6 +695,10 @@
       for (const src of mediaSrcs(element)) {
         if (src.startsWith("blob:")) {
           blobDetected.value = true;
+          captureBlobUrl(src, {
+            width: element.videoWidth || 0,
+            height: element.videoHeight || 0,
+          });
           continue;
         }
         if (!isHttpUrl(src)) {
@@ -472,6 +732,13 @@
     for (const image of document.querySelectorAll("img")) {
       const src = image.currentSrc || image.getAttribute("src") ||
         image.getAttribute("data-src") || "";
+      if (src.startsWith("blob:")) {
+        captureBlobUrl(src, {
+          width: image.naturalWidth || parseInt(image.getAttribute("width"), 10) || 0,
+          height: image.naturalHeight || parseInt(image.getAttribute("height"), 10) || 0,
+        });
+        continue;
+      }
       if (!isHttpUrl(src) || direct.has(src)) {
         continue;
       }
@@ -793,6 +1060,7 @@
   social = isOnSocialHost(hostOf(location.href));
 
   function start() {
+    installObjectUrlHook();
     startWatching();
     scan();
   }

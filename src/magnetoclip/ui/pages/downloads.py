@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 import datetime as _dt
+import time
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -14,6 +16,8 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMenu,
+    QMessageBox,
+    QProgressDialog,
     QProgressBar,
     QTableWidget,
     QTableWidgetItem,
@@ -170,6 +174,8 @@ class DownloadsPage(Page):
         row = QHBoxLayout()
         row.setSpacing(8)
 
+        self.select_all_button = self._tool("select_all", "Select All")
+        self.select_all_button.clicked.connect(self._toggle_select_all)
         self.add_button = self._tool("add", "Add")
         self.add_button.setEnabled(True)
         self.add_button.clicked.connect(self._on_add_clicked)
@@ -181,6 +187,7 @@ class DownloadsPage(Page):
         self.remove_button.setProperty("role", "danger")
         self.remove_button.clicked.connect(self._remove_selected)
 
+        row.addWidget(self.select_all_button)
         row.addWidget(self.add_button)
         row.addWidget(self.start_button)
         row.addWidget(self.pause_button)
@@ -226,10 +233,28 @@ class DownloadsPage(Page):
                 selected.append(self._ids[row])
         return selected
 
+    def _all_rows(self) -> list[int]:
+        return [r for r in range(self.table.rowCount()) if self.table.item(r, 0) is not None]
+
+    def _toggle_select_all(self) -> None:
+        rows = self._all_rows()
+        if not rows:
+            return
+        all_checked = all(self.table.item(r, 0).checkState() == Qt.Checked for r in rows)
+        state = Qt.Unchecked if all_checked else Qt.Checked
+        self.table.blockSignals(True)
+        try:
+            for r in rows:
+                self.table.item(r, 0).setCheckState(state)
+        finally:
+            self.table.blockSignals(False)
+        self._update_action_states()
+
     def _update_action_states(self) -> None:
         has_selection = bool(self._selected_ids())
         for button in (self.start_button, self.pause_button, self.remove_button):
             button.setEnabled(has_selection)
+        self.select_all_button.setEnabled(bool(self._all_rows()))
 
     # ----- actions -----
 
@@ -257,19 +282,154 @@ class DownloadsPage(Page):
         dialog = AddUrlDialog(self.context, parent=self)
         if not dialog.exec():
             return
+        if dialog.url().lower().startswith("blob:"):
+            self._add_blob_download(dialog)
+            return
         manager = self.context.manager
-        download = manager.add(
-            dialog.url(),
-            filename=dialog.filename() or None,
-            save_dir=dialog.directory() or None,
-            category_name=dialog.category() or None,
-            queue_id=dialog.queue_id(),
-            connections_max=dialog.connections() or None,
-            proxy_profile_id=dialog.proxy_profile_id(),
-            auth_username=dialog.auth_username(),
-            auth_password=dialog.auth_password(),
-            cookies=dialog.cookies(),
+        try:
+            download = manager.add(
+                dialog.url(),
+                filename=dialog.filename() or None,
+                save_dir=dialog.directory() or None,
+                category_name=dialog.category() or None,
+                queue_id=dialog.queue_id(),
+                connections_max=dialog.connections() or None,
+                proxy_profile_id=dialog.proxy_profile_id(),
+                auth_username=dialog.auth_username(),
+                auth_password=dialog.auth_password(),
+                cookies=dialog.cookies(),
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Cannot Add Download", str(exc))
+            return
+        manager.start(download.id)
+
+    # ----- blob: URL downloads (fetched from the browser) -----
+
+    def _add_blob_download(self, dialog: AddUrlDialog) -> None:
+        """Fetch a pasted ``blob:`` URL from the browser via the extension.
+
+        The request is persisted for the browser-host process, which pushes it
+        to the extension. The extension streams the bytes back and the host
+        stores them on the same row; we poll until it is ready, errors, or the
+        browser never answers.
+        """
+        from magnetoclip.database.repositories import BrowserRequestRepository
+
+        with self.context.session_factory() as session:
+            request = BrowserRequestRepository(session).add(
+                "fetch_blob", payload={"url": dialog.url()}
+            )
+        request_id = request.id
+
+        progress = QProgressDialog(
+            "Fetching blob from your browser…\nKeep the page you copied it "
+            "from open.",
+            "Cancel",
+            0,
+            0,
+            self,
         )
+        progress.setWindowTitle("MagnetoClip")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setCancelButtonText("Cancel")
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.show()
+
+        deadline = time.monotonic() + 30
+        timer = QTimer(self)
+        timer.setInterval(250)
+        done = {"value": False}
+
+        def poll() -> None:
+            if done["value"]:
+                return
+            if progress.wasCanceled():
+                self._expire_blob_request(request_id)
+                self._close_progress(progress, timer, done)
+                return
+            with self.context.session_factory() as session:
+                current = BrowserRequestRepository(session).get(request_id)
+            if current is None or current.status == "expired":
+                self._close_progress(progress, timer, done)
+                QMessageBox.warning(
+                    self,
+                    "Cannot Add Download",
+                    "Timed out waiting for the browser. Is the MagnetoClip "
+                    "extension connected and the source page still open?",
+                )
+                return
+            if current.status == "error":
+                self._close_progress(progress, timer, done)
+                message = (
+                    (current.result_json or {}).get("message")
+                    or "Could not fetch this blob from the browser."
+                )
+                QMessageBox.warning(self, "Cannot Add Download", message)
+                return
+            if current.status == "ready":
+                self._close_progress(progress, timer, done)
+                self._finish_blob_download(dialog, current)
+                return
+            if time.monotonic() >= deadline:
+                self._expire_blob_request(request_id)
+                self._close_progress(progress, timer, done)
+                QMessageBox.warning(
+                    self,
+                    "Cannot Add Download",
+                    "Timed out waiting for the browser. Make sure the "
+                    "MagnetoClip extension is connected.",
+                )
+                return
+
+        timer.timeout.connect(poll)
+        timer.start()
+        poll()
+
+    def _expire_blob_request(self, request_id: int) -> None:
+        from magnetoclip.database.repositories import BrowserRequestRepository
+
+        try:
+            with self.context.session_factory() as session:
+                BrowserRequestRepository(session).mark_expired(request_id)
+        except Exception:  # noqa: BLE001 - best-effort cleanup
+            pass
+
+    @staticmethod
+    def _close_progress(progress, timer: QTimer, done: dict) -> None:
+        done["value"] = True
+        timer.stop()
+        progress.close()
+
+    def _finish_blob_download(self, dialog: AddUrlDialog, request) -> None:
+        try:
+            data = base64.b64decode(request.data_base64, validate=True)
+        except Exception:  # noqa: BLE001 - corrupt blob data is rejected
+            data = None
+        if data is None:
+            QMessageBox.warning(
+                self, "Cannot Add Download", "The blob data could not be read."
+            )
+            return
+        filename = (
+            dialog.filename()
+            or (request.result_json or {}).get("filename")
+            or None
+        )
+        manager = self.context.manager
+        try:
+            download = manager.add(
+                dialog.url(),
+                filename=filename,
+                save_dir=dialog.directory() or None,
+                category_name=dialog.category() or None,
+                connections_max=dialog.connections() or None,
+                data=data,
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Cannot Add Download", str(exc))
+            return
         manager.start(download.id)
 
     def _on_double_clicked(self, row: int, _column: int) -> None:
@@ -533,3 +693,4 @@ class DownloadsPage(Page):
         for snapshot in manager.list_snapshots(limit=2000):
             self._upsert(snapshot)
         self._update_empty_state()
+        self._update_action_states()

@@ -23,6 +23,7 @@ from magnetoclip.browser.native_messaging.host import run_host
 from magnetoclip.resources import app_icon
 from magnetoclip.services.logging.setup import get_logger
 from magnetoclip.ui.main_window import MainWindow
+from magnetoclip.ui.splash import SplashScreen
 from magnetoclip.version import __version__
 
 log = get_logger(__name__)
@@ -62,13 +63,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             log.warning("browser_integration_ensure_failed", exc_info=True)
 
     async def _run_until_close() -> None:
+        splash = SplashScreen()
+        splash.show()
+        app.processEvents()
+
+        import asyncio as _asyncio
+        await _asyncio.sleep(4)
+
         if context.settings.get("scheduler.enabled", False):
             try:
                 await context.scheduler.start()
             except Exception:  # noqa: BLE001 - scheduler must not prevent startup
                 log.warning("scheduler_start_failed", exc_info=True)
+
+        splash.close_with_fade()
         window.show()
         log.info("main_window_shown")
+
+        if context.settings.get("updates.check_enabled", True):
+            loop.create_task(_check_updates_background(context))
+
         try:
             while window.isVisible():
                 await asyncio.sleep(0.05)
@@ -85,6 +99,40 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
+async def _check_updates_background(context) -> None:
+    """Check for updates in the background without blocking the UI."""
+    from datetime import UTC, datetime
+
+    from magnetoclip.core.events.bus import Events
+    from magnetoclip.services.updates import UpdateChecker
+
+    endpoint = context.settings.get("updates.endpoint", "")
+    if not endpoint:
+        return
+
+    checker = UpdateChecker(endpoint)
+    try:
+        result = await checker.check(__version__)
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        context.settings.set("updates.last_checked", now)
+
+        if result.update_available:
+            log.info(
+                "update_available",
+                current=__version__,
+                latest=result.latest_version,
+            )
+            context.events.post(Events.UPDATE_AVAILABLE, {
+                "current_version": __version__,
+                "latest_version": result.latest_version,
+                "update_info": result.update_info,
+            })
+        else:
+            log.info("no_update_available", version=__version__)
+    except Exception:
+        log.warning("background_update_check_failed", exc_info=True)
+
+
 def _browser_host_main(argv: Sequence[str]) -> int:
     """Run as a native messaging host: read from stdin, respond on stdout."""
     context = build_context()
@@ -94,7 +142,11 @@ def _browser_host_main(argv: Sequence[str]) -> int:
         loop = asyncio.get_running_loop()
         bridge = BrowserManager(context)
         bridge.start(loop)
-        await asyncio.to_thread(run_host, bridge.handle_message)
+        await asyncio.to_thread(
+            run_host,
+            bridge.handle_message,
+            outbound=bridge.next_outbound_message,
+        )
         log.info("browser_host_finished")
         await context.shutdown()
         loop.stop()

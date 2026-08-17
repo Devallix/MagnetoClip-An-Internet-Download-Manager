@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -75,10 +76,10 @@ async def test_streaming_completion_rewrites_filename(tmp_path, monkeypatch):
         lambda url, quality, **kwargs: fake_info(title="Real Title"),
     )
 
-    def fake_download_stream(url, save_dir, quality, progress_cb, cancel_event, cookies=None):
-        save_dir = save_dir / "Real Title.mp4"
-        save_dir.write_bytes(b"x" * 1234)
-        return save_dir
+    def fake_download_stream(url, save_dir, quality, progress_cb, cancel_event, cookies=None, filename=None):
+        target = save_dir / (filename or "Real Title.mp4")
+        target.write_bytes(b"x" * 1234)
+        return target
 
     monkeypatch.setattr(
         "magnetoclip.core.downloads.manager.download_stream",
@@ -125,7 +126,7 @@ async def test_streaming_cancel_marks_stopped(tmp_path, monkeypatch):
     )
     cancel_event_holder = {}
 
-    def fake_download_stream(url, save_dir, quality, progress_cb, cancel_event, cookies=None):
+    def fake_download_stream(url, save_dir, quality, progress_cb, cancel_event, cookies=None, filename=None):
         cancel_event_holder["event"] = cancel_event
         progress_cb(
             {
@@ -166,7 +167,7 @@ async def test_streaming_pause_resume_restarts(tmp_path, monkeypatch):
     )
     calls = []
 
-    def fake_download_stream(url, save_dir, quality, progress_cb, cancel_event, cookies=None):
+    def fake_download_stream(url, save_dir, quality, progress_cb, cancel_event, cookies=None, filename=None):
         calls.append("start")
         while not cancel_event.is_set():
             time.sleep(0.01)
@@ -202,6 +203,123 @@ async def test_streaming_pause_resume_restarts(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_streaming_resume_reuses_partial(tmp_path, monkeypatch):
+    context = make_context(tmp_path)
+    resolve_calls = []
+    monkeypatch.setattr(
+        "magnetoclip.core.downloads.manager.resolve_stream",
+        lambda url, quality, **kwargs: (
+            resolve_calls.append(url),
+            fake_info(title="New Title"),
+        )[1],
+    )
+    seen = {}
+
+    def fake_download_stream(url, save_dir, quality, progress_cb, cancel_event, cookies=None, filename=None):
+        seen["filename"] = filename
+        target = save_dir / filename
+        target.write_bytes(b"x" * 2048)
+        return target
+
+    monkeypatch.setattr(
+        "magnetoclip.core.downloads.manager.download_stream",
+        fake_download_stream,
+    )
+
+    download = context.manager.add("https://www.youtube.com/watch?v=resume")
+    target = Path(context.settings.get("downloads.default_directory")) / "Demo Video.mp4"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    Path(str(target) + ".part").write_bytes(b"x" * 512)
+    with context.session_factory() as session:
+        from magnetoclip.database.repositories import DownloadRepository
+
+        row = DownloadRepository(session).get(download.id)
+        row.save_path = str(target)
+        row.filename = "Demo Video.mp4"
+        session.commit()
+
+    context.manager.start(download.id)
+    await wait_for_status(context.manager, download.id, "completed")
+    assert resolve_calls == []
+    assert seen["filename"] == "Demo Video.mp4"
+    final = context.manager.get_download(download.id)
+    assert final.save_path.endswith("Demo Video.mp4")
+    await context.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_streaming_resume_reuses_merged_format_parts(tmp_path, monkeypatch):
+    """yt-dlp DASH/merged downloads leave ``name.fXXX.part`` intermediates and
+    no plain ``name.part``; a paused download must detect them as partial data
+    and continue from the stored filename instead of re-resolving the stream."""
+    context = make_context(tmp_path)
+    resolve_calls = []
+    monkeypatch.setattr(
+        "magnetoclip.core.downloads.manager.resolve_stream",
+        lambda url, quality, **kwargs: (
+            resolve_calls.append(url),
+            fake_info(title="New Title"),
+        )[1],
+    )
+    seen = {}
+
+    def fake_download_stream(url, save_dir, quality, progress_cb, cancel_event, cookies=None, filename=None):
+        seen["filename"] = filename
+        target = save_dir / filename
+        target.write_bytes(b"x" * 4096)
+        return target
+
+    monkeypatch.setattr(
+        "magnetoclip.core.downloads.manager.download_stream",
+        fake_download_stream,
+    )
+
+    download = context.manager.add("https://www.youtube.com/watch?v=merged")
+    target = Path(context.settings.get("downloads.default_directory")) / "Demo Video.mp4"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    Path(str(target) + ".f137.mp4.part").write_bytes(b"x" * 2048)
+    Path(str(target) + ".f140.m4a.part").write_bytes(b"x" * 2048)
+    with context.session_factory() as session:
+        from magnetoclip.database.repositories import DownloadRepository
+
+        row = DownloadRepository(session).get(download.id)
+        row.save_path = str(target)
+        row.filename = "Demo Video.mp4"
+        session.commit()
+
+    context.manager.start(download.id)
+    await wait_for_status(context.manager, download.id, "completed")
+    assert resolve_calls == []
+    assert seen["filename"] == "Demo Video.mp4"
+    final = context.manager.get_download(download.id)
+    assert final.save_path.endswith("Demo Video.mp4")
+    await context.shutdown()
+
+
+def test_delete_parts_removes_all_part_files(tmp_path):
+    context = make_context(tmp_path)
+    download = context.manager.add("https://example.com/file.bin", filename="file.bin")
+    target = Path(context.settings.get("downloads.default_directory")) / "file.bin"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with context.session_factory() as session:
+        from magnetoclip.database.repositories import DownloadRepository
+
+        row = DownloadRepository(session).get(download.id)
+        row.save_path = str(target)
+        session.commit()
+    target.write_bytes(b"")
+    for suffix in (".mclip", ".part", ".part0", ".part9", ".part10", ".part11", ".part-frag1.ytdl"):
+        Path(f"{target}{suffix}").write_bytes(b"x")
+
+    context.manager._delete_parts(download.id)
+
+    for suffix in (".mclip", ".part", ".part0", ".part9", ".part10", ".part11", ".part-frag1.ytdl"):
+        assert not Path(f"{target}{suffix}").exists(), suffix
+    assert target.exists()
+    context.database.close()
+
+
+@pytest.mark.asyncio
 async def test_streaming_cookies_reach_resolve_and_download(tmp_path, monkeypatch):
     context = make_context(tmp_path)
     seen = {}
@@ -210,9 +328,9 @@ async def test_streaming_cookies_reach_resolve_and_download(tmp_path, monkeypatc
         seen["resolve_cookies"] = kwargs.get("cookies")
         return fake_info(title="Cookie Video")
 
-    def fake_download(url, save_dir, quality, progress_cb, cancel_event, cookies=None):
+    def fake_download(url, save_dir, quality, progress_cb, cancel_event, cookies=None, filename=None):
         seen["download_cookies"] = cookies
-        path = save_dir / "Cookie Video.mp4"
+        path = save_dir / (filename or "Cookie Video.mp4")
         path.write_bytes(b"x" * 4321)
         return path
 

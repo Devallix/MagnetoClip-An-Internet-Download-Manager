@@ -16,12 +16,25 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from magnetoclip.media.streaming import is_audio_platform, is_streaming_url
+
 from ..components.buttons import AccentButton, GhostButton
 
 RESULT_DOWNLOAD_NOW = 1
 RESULT_DOWNLOAD_LATER = 2
 RESULT_SKIP = 0
 RESULT_SKIP_ALL = 3
+
+_MAX_URL_LENGTH = 120
+
+
+def truncate_url(url: str, max_length: int = _MAX_URL_LENGTH) -> str:
+    """Shorten a URL for display, keeping its head and tail readable."""
+    if len(url) <= max_length:
+        return url
+    head = url[: max_length // 2]
+    tail = url[-(max_length // 2) :]
+    return f"{head}\u2026{tail}"
 
 
 class CaptureDialog(QDialog):
@@ -43,7 +56,7 @@ class CaptureDialog(QDialog):
         super().__init__(parent)
         self.context = context
         self.setWindowTitle("Download with MagnetoClip")
-        self.setMinimumWidth(520)
+        self.setFixedSize(520, 520)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
@@ -62,8 +75,9 @@ class CaptureDialog(QDialog):
         info_layout.setContentsMargins(12, 10, 12, 10)
         info_layout.setSpacing(4)
 
-        url_label = QLabel(url)
+        url_label = QLabel(truncate_url(url))
         url_label.setObjectName("card_caption")
+        url_label.setToolTip(url)
         url_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         url_label.setWordWrap(True)
         info_layout.addWidget(url_label)
@@ -99,6 +113,7 @@ class CaptureDialog(QDialog):
             self.category_combo.addItem(category.name)
         if self.category_combo.count() == 0:
             self.category_combo.addItem("Other")
+        self._preselect_category(url, filename, detected_type)
         layout.addWidget(self.category_combo)
 
         connections_row = QHBoxLayout()
@@ -130,6 +145,30 @@ class CaptureDialog(QDialog):
         layout.addLayout(buttons)
 
         self.filename_edit.setFocus()
+
+    def _preselect_category(
+        self, url: str, filename: str | None, detected_type: str | None
+    ) -> None:
+        """Auto-select a category so captures don't default to Documents."""
+        categories = getattr(self.context, "categories", None)
+        if categories is None or not hasattr(categories, "classify"):
+            return
+        name: str | None = None
+        if is_streaming_url(url):
+            name = "Music" if is_audio_platform(url) else "Videos"
+        elif detected_type in ("image", "audio", "video"):
+            name = {
+                "image": "Images",
+                "audio": "Music",
+                "video": "Videos",
+            }.get(detected_type)
+        if name is None:
+            candidate = categories.classify(filename=filename or "", url=url)
+            name = candidate.name if candidate else None
+        if name:
+            index = self.category_combo.findText(name)
+            if index >= 0:
+                self.category_combo.setCurrentIndex(index)
 
     def _download_now(self) -> None:
         if self._validate():

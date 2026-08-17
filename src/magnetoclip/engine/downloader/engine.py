@@ -19,6 +19,7 @@ import httpx
 from magnetoclip.core.events.bus import Events
 from magnetoclip.intelligence import BandwidthAllocator
 from magnetoclip.network.auth.credentials import AuthSpec
+from magnetoclip.network.content import should_reject_html_body
 from magnetoclip.network.http.client import ClientConfig, build_client
 from magnetoclip.network.http.disposition import parse_content_disposition
 from magnetoclip.network.http.range import parse_content_range
@@ -159,6 +160,11 @@ class DownloadTask:
         if self.state.state == "paused":
             self._running.set()
             self._set_state("downloading")
+        elif not self._running.is_set():
+            # A pause landed during the brief connecting→downloading
+            # transition: the state already reads "downloading" but the
+            # workers are still blocked, so just release them.
+            self._running.set()
 
     def cancel(self) -> None:
         self._cancel.set()
@@ -214,12 +220,19 @@ class DownloadTask:
             self.state.last_modified = info.last_modified or self.state.last_modified
             if not info.supports_ranges:
                 self.spec.connections_max = 1
+            self._reject_html_substitute(info)
 
         if not self.state.segments:
             self._plan_segments()
         reconcile_part_sizes(self.state)
+        self._reconcile_segments_for_size()
 
         self._set_state("downloading")
+        if not self._running.is_set():
+            # Paused while the resource was being analysed: pause() cleared the
+            # running event, but the _set_state("downloading") above would have
+            # overwritten the "paused" state that resume() relies on.
+            self._set_state("paused")
         self._persist()
 
         pool = SegmentPool(
@@ -298,6 +311,14 @@ class DownloadTask:
                 await asyncio.sleep(self.spec.retry_base * (2 ** (attempt - 1)))
         raise last_error or PermanentError("resource analysis failed")
 
+    def _reject_html_substitute(self, info: RemoteFileInfo) -> None:
+        """Refuse to write an HTML error page over a binary filename."""
+        if should_reject_html_body(info.content_type, self.spec.final_path.name):
+            raise PermanentError(
+                "server returned an HTML page instead of the requested file "
+                "(the link may be broken, removed, or behind a login)"
+            )
+
     def _plan_segments(self) -> None:
         total = self.state.total_size
         count = self.spec.connections_max if total and total > 0 else 1
@@ -306,6 +327,51 @@ class DownloadTask:
             SegmentState(index=index, start=start, end=end)
             for index, (start, end) in enumerate(ranges)
         ]
+
+    def _reconcile_segments_for_size(self) -> None:
+        """Adjust a resumed segment plan when the remote size changed.
+
+        The plan is normally only built once; resuming re-probes the resource,
+        which can report a different total size (e.g. a file that grew or was
+        replaced). Without this, a larger file would be merged truncated, and a
+        smaller one would request ranges past EOF. Boundaries are preserved so
+        existing part files keep mapping to the same byte ranges; only the last
+        segment's end is extended/shrunk and segments beyond the new EOF are
+        discarded.
+        """
+        total = self.state.total_size
+        segments = self.state.segments
+        if total is None or not segments:
+            return
+        last = segments[-1]
+        if last.end is None or last.end == total - 1:
+            return
+        if total - 1 > last.end:
+            last.end = total - 1
+            return
+        # File shrank: clamp every segment to the new EOF and drop any that
+        # now start past it.
+        for segment in list(segments):
+            if segment.start > total - 1:
+                self.state.segments.remove(segment)
+                try:
+                    self.state.part_path(segment.index).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            elif segment.end is not None and segment.end > total - 1:
+                segment.end = total - 1
+        # Trim any stale tail bytes written to the clamped final segment.
+        if self.state.segments:
+            tail = self.state.segments[-1]
+            final_part = self.state.part_path(tail.index)
+            if final_part.exists():
+                try:
+                    new_length = tail.length or 0
+                    if final_part.stat().st_size > new_length:
+                        with open(final_part, "r+b") as handle:
+                            handle.truncate(new_length)
+                except OSError:
+                    pass
 
     def _merge_parts(self) -> None:
         final = self.spec.final_path

@@ -65,3 +65,6 @@ class AppContext:
             except Exception:
                 log.warning("manager_shutdown_failed", exc_info=True)
         self.database.close()
+        from magnetoclip.services.logging.setup import shutdown_logging
+
+        shutdown_logging()

@@ -1,6 +1,7 @@
 import pytest
 
 from magnetoclip.app.lifecycle import build_context
+from magnetoclip.browser.skip import enable_skip_all, skip_all_active
 from magnetoclip.core.events.bus import Events
 from magnetoclip.ui.dialogs.add_url import AddUrlDialog
 from magnetoclip.ui.main_window import MainWindow
@@ -35,9 +36,9 @@ def test_table_header_sections_have_borders(qapp):
 def test_main_window_constructs(qtbot, context):
     window = MainWindow(context)
     qtbot.addWidget(window)
-    assert window.windowTitle() == "MagnetoClip 0.1.0"
+    assert window.windowTitle() == "MagnetoClip 0.1.1"
     assert window.sidebar is not None
-    assert window.stack.count() == 8
+    assert window.stack.count() == 9
 
 
 def test_navigation_switches_pages(qtbot, context):
@@ -150,7 +151,7 @@ def test_categories_page_removed(qtbot, context):
     qtbot.addWidget(window)
     assert "categories" not in window._nav_buttons
     assert "Categories" not in window._pages
-    assert window.stack.count() == 8
+    assert window.stack.count() == 9
 
 
 def test_sidebar_toggle_collapses(qtbot, context):
@@ -255,6 +256,33 @@ def test_add_url_dialog_validates(qtbot, context):
     assert dialog.connections() >= 1
 
 
+def test_add_url_dialog_rejects_unsupported_schemes(qtbot, context):
+    dialog = AddUrlDialog(context)
+    qtbot.addWidget(dialog)
+    assert AddUrlDialog._url_error("https://example.com/file.zip") is None
+    assert AddUrlDialog._url_error("http://example.com/a.bin") is None
+    # blob: URLs are accepted (content is fetched via the browser extension).
+    assert AddUrlDialog._url_error("blob:https://web.telegram.org/55d2a84a-91c1-4b2e") is None
+    assert AddUrlDialog._url_error("ftp://example.com/x.zip")
+    assert AddUrlDialog._url_error("not-a-url")
+    # The dialog stays open and shows the message instead of crashing the app.
+    dialog.url_edit.setText("ftp://example.com/x.zip")
+    dialog._accept()
+    assert not dialog.result()
+    assert dialog.error_label.text() and "http://" in dialog.error_label.text().lower()
+    assert not dialog.error_label.isHidden()
+
+
+def test_add_url_dialog_shows_blob_hint(qtbot, context):
+    dialog = AddUrlDialog(context)
+    qtbot.addWidget(dialog)
+    assert dialog.blob_hint.isHidden()
+    dialog.url_edit.setText("blob:https://web.telegram.org/55d2a84a-91c1-4b2e")
+    assert not dialog.blob_hint.isHidden()
+    dialog.url_edit.setText("https://example.com/file.zip")
+    assert dialog.blob_hint.isHidden()
+
+
 def test_about_dialog_constructs(qtbot):
     from magnetoclip.ui.dialogs.about import AboutDialog
 
@@ -348,6 +376,68 @@ def test_browser_capture_toggle_persists(qtbot, context):
     page.capture_check.setChecked(False)
     assert context.settings.get("browser.capture_enabled") is False
     assert page.capture_check.isChecked() is False
+
+
+def test_capture_watcher_skip_all_click_activates_suppression(qtbot, context):
+    from magnetoclip.database.repositories import PendingCaptureRepository
+    from magnetoclip.ui.components.capture_watcher import CaptureWatcher
+    from magnetoclip.ui.dialogs.capture import RESULT_SKIP_ALL
+
+    watcher = CaptureWatcher(context)
+    with context.session_factory() as session:
+        repo = PendingCaptureRepository(session)
+        first = repo.add("https://example.com/a.zip", filename="a.zip")
+        second = repo.add("https://example.com/b.zip", filename="b.zip")
+
+    watcher._apply_decision(first, RESULT_SKIP_ALL, None)
+
+    assert skip_all_active(context) is True
+    with context.session_factory() as session:
+        repo = PendingCaptureRepository(session)
+        assert repo.pending() == []
+        assert repo.get(first.id).status == "rejected"
+        assert repo.get(second.id).status == "rejected"
+
+
+def test_capture_watcher_suppresses_dialog_while_skip_all_active(qtbot, context):
+    from magnetoclip.database.repositories import PendingCaptureRepository
+    from magnetoclip.ui.components.capture_watcher import CaptureWatcher
+
+    enable_skip_all(context, duration=None)
+    with context.session_factory() as session:
+        PendingCaptureRepository(session).add("https://example.com/a.zip")
+
+    watcher = CaptureWatcher(context)
+    with context.session_factory() as session:
+        assert len(PendingCaptureRepository(session).pending()) == 1
+
+    handled = watcher._handle_captures()
+
+    assert handled == 0
+    with context.session_factory() as session:
+        assert PendingCaptureRepository(session).pending() == []
+
+
+def test_capture_watcher_skip_all_re_enabled(qtbot, context):
+    from magnetoclip.browser.skip import disable_skip_all
+    from magnetoclip.database.repositories import PendingCaptureRepository
+    from magnetoclip.ui.components.capture_watcher import CaptureWatcher
+    from magnetoclip.ui.dialogs.capture import RESULT_SKIP_ALL
+
+    watcher = CaptureWatcher(context)
+    with context.session_factory() as session:
+        capture = PendingCaptureRepository(session).add("https://example.com/a.zip")
+
+    watcher._apply_decision(capture, RESULT_SKIP_ALL, None)
+    assert skip_all_active(context) is True
+
+    disable_skip_all(context)
+    assert skip_all_active(context) is False
+
+    with context.session_factory() as session:
+        PendingCaptureRepository(session).add("https://example.com/b.zip")
+    with context.session_factory() as session:
+        assert len(PendingCaptureRepository(session).pending()) == 1
 
 
 def test_browser_page_manual_setup_steps(qtbot, context):
@@ -563,6 +653,34 @@ def test_add_url_dialog_auto_selects_category(qtbot, context):
     assert dialog.category() == "Archives"
     dialog.url_edit.setText("https://example.com/photo.png")
     assert dialog.category() == "Images"
+    dialog.url_edit.setText("https://www.youtube.com/watch?v=abc")
+    assert dialog.category() == "Videos"
+    dialog.url_edit.setText("https://soundcloud.com/artist/track")
+    assert dialog.category() == "Music"
+    dialog.url_edit.setText("https://pbs.twimg.com/media/XYZ?format=jpg&name=large")
+    assert dialog.category() == "Images"
+
+
+def test_capture_dialog_preselects_category(qtbot, context):
+    from magnetoclip.ui.dialogs.capture import CaptureDialog
+
+    dialog = CaptureDialog(
+        context,
+        url="https://pbs.twimg.com/media/XYZ?format=jpg&name=large",
+        filename="XYZ",
+        detected_type="image",
+    )
+    qtbot.addWidget(dialog)
+    assert dialog.category() == "Images"
+
+    dialog = CaptureDialog(
+        context,
+        url="https://www.youtube.com/watch?v=abc",
+        filename="",
+        detected_type="file",
+    )
+    qtbot.addWidget(dialog)
+    assert dialog.category() == "Videos"
 
 
 def test_download_context_menu_queued(qtbot, context):
@@ -689,6 +807,33 @@ def test_tray_message_click_ignored_without_download(qtbot, context, monkeypatch
     assert calls == []
 
 
+def test_tray_message_click_routes_registered_action(qtbot, context, monkeypatch):
+    import magnetoclip.ui.components.tray as tray_module
+
+    monkeypatch.setattr(tray_module, "reveal_path", lambda p: None)
+    tray = tray_module.SystemTray(context)
+    opened = []
+    tray.register_action("detected", lambda: opened.append("detected"))
+    tray.show_message("Title", "Body", download_id=None, action="detected")
+    tray._message_action = "detected"
+    tray._on_message_clicked()
+    assert opened == ["detected"]
+    assert tray._message_action is None
+
+
+def test_tray_message_click_unregistered_action_opens_window(qtbot, context, monkeypatch):
+    import magnetoclip.ui.components.tray as tray_module
+
+    monkeypatch.setattr(tray_module, "reveal_path", lambda p: None)
+    tray = tray_module.SystemTray(context)
+    opened = []
+    tray.register_action("detected", lambda: opened.append("detected"))
+    tray.set_open_callback(lambda: opened.append("window"))
+    tray._message_action = "other"
+    tray._on_message_clicked()
+    assert opened == ["window"]
+
+
 def test_notifier_plays_sound_and_passes_download_id(qtbot, context, monkeypatch):
     import sys
     import types
@@ -702,8 +847,8 @@ def test_notifier_plays_sound_and_passes_download_id(qtbot, context, monkeypatch
         def is_available(self):
             return True
 
-        def show_message(self, title, body, download_id=None):
-            self.shown.append((title, body, download_id))
+        def show_message(self, title, body, download_id=None, action=None):
+            self.shown.append((title, body, download_id, action))
 
     fake_winsound = types.ModuleType("winsound")
     beeps = []
@@ -722,7 +867,7 @@ def test_notifier_plays_sound_and_passes_download_id(qtbot, context, monkeypatch
         }
     )
     assert beeps == [0x40]
-    assert tray.shown == [("clip.mp4", "Download complete", 7)]
+    assert tray.shown == [("clip.mp4", "Download complete", 7, None)]
     notifier.close()
 
 
@@ -736,7 +881,7 @@ def test_notifier_failed_kind_no_sound(qtbot, context, monkeypatch):
         def is_available(self):
             return True
 
-        def show_message(self, title, body, download_id=None):
+        def show_message(self, title, body, download_id=None, action=None):
             pass
 
     fake_winsound = types.ModuleType("winsound")
@@ -750,3 +895,134 @@ def test_notifier_failed_kind_no_sound(qtbot, context, monkeypatch):
     )
     assert beeps == []
     notifier.close()
+
+
+def test_detected_page_renders_detections(qtbot, context):
+    from PySide6.QtCore import Qt
+
+    from magnetoclip.database.repositories import BrowserDetectionRepository
+
+    with context.session_factory() as session:
+        BrowserDetectionRepository(session).add(
+            "https://example.com/page",
+            count=2,
+            files=[
+                {
+                    "url": "https://example.com/a.zip",
+                    "filename": "a.zip",
+                    "detected_type": "archive",
+                },
+                {
+                    "url": "https://example.com/b.pdf",
+                    "filename": "b.pdf",
+                    "detected_type": "document",
+                },
+            ],
+        )
+
+    window = MainWindow(context)
+    qtbot.addWidget(window)
+    window._activate("Detected")
+    page = window._pages["Detected"]
+    assert len(page._files) == 2
+    assert page.table.rowCount() == 2
+    assert page.table.item(0, 1).text() in ("a.zip", "b.pdf")
+
+    page.table.item(0, 0).setCheckState(Qt.Checked)
+    page._download_selected()
+    download = next(
+        (d for d in context.manager.list_snapshots() if d["filename"] in ("a.zip", "b.pdf")),
+        None,
+    )
+    assert download is not None
+    assert len(page._files) == 1
+    with context.session_factory() as session:
+        assert len(BrowserDetectionRepository(session).list_detections()) == 1
+
+
+def test_detected_page_empty_state(qtbot, context):
+    window = MainWindow(context)
+    qtbot.addWidget(window)
+    window._activate("Detected")
+    page = window._pages["Detected"]
+    assert page.table.rowCount() == 1
+    assert page._empty_row == 0
+    assert not page.select_all_button.isEnabled()
+
+
+def test_detected_page_shows_source_page(qtbot, context):
+    from magnetoclip.database.repositories import BrowserDetectionRepository
+
+    with context.session_factory() as session:
+        BrowserDetectionRepository(session).add(
+            "https://www.web.telegram.org/a/b?hl=en",
+            count=1,
+            files=[
+                {
+                    "url": "blob:https://www.web.telegram.org/abc",
+                    "filename": "clip.jpg",
+                    "detected_type": "image",
+                }
+            ],
+        )
+
+    window = MainWindow(context)
+    qtbot.addWidget(window)
+    window._activate("Detected")
+    page = window._pages["Detected"]
+    assert page.table.rowCount() == 1
+    page_item = page.table.item(0, 4)
+    assert page_item.text() == "web.telegram.org"
+    assert page_item.toolTip() == "https://www.web.telegram.org/a/b?hl=en"
+
+
+def test_page_label_fallbacks():
+    from magnetoclip.ui.pages.detected import _page_label
+
+    assert _page_label("https://www.web.telegram.org/a") == "web.telegram.org"
+    assert _page_label("https://web.telegram.org/a") == "web.telegram.org"
+    assert _page_label("") == "—"
+    assert _page_label("not a url") == "—"
+
+
+def test_tray_notification_click_opens_detected_page(qtbot, context):
+    window = MainWindow(context)
+    qtbot.addWidget(window)
+    window._activate("Downloads")
+    assert window.stack.currentWidget() is window._pages["Downloads"]
+
+    window.tray._message_action = "detected"
+    window.tray._on_message_clicked()
+    assert window.stack.currentWidget() is window._pages["Detected"]
+    assert window.tray._message_action is None
+
+
+def test_detected_page_select_all(qtbot, context):
+    from PySide6.QtCore import Qt
+
+    from magnetoclip.database.repositories import BrowserDetectionRepository
+
+    with context.session_factory() as session:
+        BrowserDetectionRepository(session).add(
+            "https://example.com/page",
+            count=3,
+            files=[
+                {"url": "https://example.com/a.zip", "filename": "a.zip", "detected_type": "archive"},
+                {"url": "https://example.com/b.pdf", "filename": "b.pdf", "detected_type": "document"},
+                {"url": "https://example.com/c.jpg", "filename": "c.jpg", "detected_type": "image"},
+            ],
+        )
+
+    window = MainWindow(context)
+    qtbot.addWidget(window)
+    window._activate("Detected")
+    page = window._pages["Detected"]
+
+    assert page.select_all_button.isEnabled()
+    page._toggle_select_all()
+    assert page._selected_indexes() == [0, 1, 2]
+    assert page.download_button.isEnabled()
+
+    page._toggle_select_all()
+    assert page._selected_indexes() == []
+    assert not page.download_button.isEnabled()

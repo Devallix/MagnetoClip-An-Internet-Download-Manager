@@ -31,6 +31,17 @@ class TestSanitizeFilename:
     def test_empty_falls_back(self) -> None:
         assert sanitize_filename("  .  ") == "download"
 
+    def test_caps_overlong_names_keeping_extension(self) -> None:
+        long_name = "x" * 400 + ".png"
+        capped = sanitize_filename(long_name)
+        assert len(capped) <= 180
+        assert capped.endswith(".png")
+        assert len(capped[:-4]) == 176
+
+    def test_caps_extensionless_names(self) -> None:
+        capped = sanitize_filename("y" * 500)
+        assert len(capped) <= 180
+
 
 class TestSafeJoin:
     def test_normal_join(self, tmp_path: Path) -> None:

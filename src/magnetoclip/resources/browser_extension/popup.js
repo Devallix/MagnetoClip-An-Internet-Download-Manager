@@ -72,15 +72,46 @@ function typeLabel(type) {
   return TYPE_ICONS[type] || "◈";
 }
 
-function sendDownload(file, pageUrl) {
+function showCaptureError(message) {
+  els.errorText.textContent = message;
+  els.errorBox.style.display = "block";
+}
+
+function sendDownload(file, pageUrl, button) {
   try {
-    chrome.runtime.sendMessage({
-      type: "download_file",
-      url: file.url,
-      filename: file.filename || "",
-      referrer: pageUrl,
-      detected_type: file.detected_type || "file",
-    });
+    chrome.runtime.sendMessage(
+      {
+        type: "download_file",
+        url: file.url,
+        filename: file.filename || "",
+        referrer: pageUrl,
+        detected_type: file.detected_type || "file",
+      },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          if (button) {
+            button.disabled = false;
+            button.textContent = "Download";
+            button.classList.remove("sent");
+          }
+          showCaptureError(chrome.runtime.lastError.message);
+          return;
+        }
+        if (!response) {
+          return;
+        }
+        if (response.type === "capture_error") {
+          if (button) {
+            button.disabled = false;
+            button.textContent = "Download";
+            button.classList.remove("sent");
+          }
+          showCaptureError(
+            response.message || "MagnetoClip could not download this file."
+          );
+        }
+      }
+    );
   } catch (error) {
     if (/Extension context invalidated/i.test(String(error && error.message))) {
       setError("The extension was updated. Reload this page and try again.");
@@ -124,7 +155,7 @@ function renderDetected(data) {
     button.className = "detected-btn";
     button.textContent = "Download";
     button.addEventListener("click", () => {
-      sendDownload(file, (data && data.url) || "");
+      sendDownload(file, (data && data.url) || "", button);
       button.textContent = "Sent";
       button.classList.add("sent");
       button.disabled = true;

@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 
 from PySide6.QtCore import QObject, QTimer
 
+from magnetoclip.browser.skip import enable_skip_all, skip_all_active
 from magnetoclip.core.events.bus import Events
 from magnetoclip.database.repositories import (
     BrowserDetectionRepository,
@@ -87,6 +88,7 @@ class CaptureWatcher(QObject):
                     "kind": "info",
                     "title": "Downloadable files detected",
                     "body": f"{detection.count} file(s) available on {host}",
+                    "action": "detected",
                 },
             )
         return len(detections)
@@ -98,6 +100,9 @@ class CaptureWatcher(QObject):
             repo = PendingCaptureRepository(session)
             repo.expire_stale()
             pending = repo.pending()
+            if pending and skip_all_active(self.context):
+                repo.resolve_all("rejected")
+                pending = []
         if not pending:
             return 0
         capture = pending[0]
@@ -116,12 +121,14 @@ class CaptureWatcher(QObject):
 
     def _apply_decision(self, capture, result, dialog) -> None:
         if result == RESULT_SKIP_ALL:
+            enable_skip_all(self.context)
             self._reject_all_pending()
             return
         if result == RESULT_SKIP:
             self._resolve(capture.id, "rejected")
             return
         try:
+            data = self._decode_data(getattr(capture, "data_base64", None))
             download = self.context.manager.add(
                 capture.url,
                 filename=dialog.filename(),
@@ -130,14 +137,27 @@ class CaptureWatcher(QObject):
                 connections_max=dialog.connections(),
                 headers={"Referer": capture.referrer} if capture.referrer else None,
                 cookies=capture.cookies_json,
+                data=data,
             )
         except Exception as exc:  # noqa: BLE001 - surface add failures as a rejection
             log.warning("capture_add_failed", capture_id=capture.id, error=str(exc))
             self._resolve(capture.id, "rejected")
             return
         self._resolve(capture.id, "approved", download_id=download.id)
-        if result == RESULT_DOWNLOAD_NOW:
+        if result == RESULT_DOWNLOAD_NOW and data is None:
             self._start(download.id)
+
+    @staticmethod
+    def _decode_data(data_base64: str | None) -> bytes | None:
+        """Decode inline capture data; None when absent or corrupt."""
+        if not data_base64:
+            return None
+        try:
+            import base64
+
+            return base64.b64decode(data_base64, validate=True)
+        except Exception:  # noqa: BLE001 - corrupt data falls back to a normal add
+            return None
 
     def _start(self, download_id: int) -> None:
         try:

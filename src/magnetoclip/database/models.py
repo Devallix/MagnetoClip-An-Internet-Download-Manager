@@ -237,6 +237,7 @@ class PendingCapture(Base):
     source: Mapped[Optional[str]] = mapped_column(String(64))
     detected_type: Mapped[Optional[str]] = mapped_column(String(64))
     cookies_json: Mapped[Optional[dict]] = mapped_column(JSON)
+    data_base64: Mapped[Optional[str]] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(16), default="pending")
     download_id: Mapped[Optional[int]] = mapped_column(ForeignKey("downloads.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
@@ -253,6 +254,31 @@ class BrowserDetection(Base):
     files_json: Mapped[Optional[dict]] = mapped_column(JSON)
     notified: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class BrowserRequest(Base):
+    """A request from the app for the browser to fulfil (e.g. a ``blob:`` fetch).
+
+    The native-messaging host runs in a separate process and can only answer
+    extension messages, so the app persists a request here and the host's
+    outbound writer pushes it to the extension. The extension streams the blob
+    back as chunks, which the host reassembles into this row for the app to read.
+    """
+
+    __tablename__ = "browser_requests"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
+    payload_json: Mapped[Optional[dict]] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(
+        String(16), default="queued", server_default="queued"
+    )
+    result_json: Mapped[Optional[dict]] = mapped_column(JSON)
+    data_base64: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
 
 
 class Setting(Base):
