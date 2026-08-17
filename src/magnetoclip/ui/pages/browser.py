@@ -272,7 +272,8 @@ class BrowserPage(Page):
     def _copy_extension_path(self) -> None:
         from PySide6.QtWidgets import QApplication
 
-        QApplication.clipboard().setText(self.context.browser.extension_dir())
+        path = self.context.browser.extension_dir()
+        QApplication.clipboard().setText(str(path))
 
     def _install_one(self, browser: str) -> None:
         self.context.browser.install([browser])
