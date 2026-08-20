@@ -485,7 +485,8 @@ class SettingsPage(Page):
         reply = QMessageBox.question(
             self,
             "Install Update",
-            "MagnetoClip will close and the installer will launch.\n\n"
+            "MagnetoClip will close, the update will be applied,\n"
+            "and MagnetoClip will restart automatically.\n\n"
             "Do you want to proceed?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes,

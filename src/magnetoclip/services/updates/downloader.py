@@ -114,8 +114,18 @@ class UpdateDownloader:
     def install(self, zip_path: Path) -> bool:
         """Extract the zip file and replace the current installation.
 
-        The zip should contain MagnetoClip.exe and _internal/ at the root.
-        Returns True if the installation was successful.
+        On Windows the running executable and DLLs are locked by the OS, so we
+        cannot rename the install directory directly.  Instead we:
+
+        1. Extract the zip into a temporary staging directory.
+        2. Write a small ``.bat`` helper that waits for the app to exit, swaps
+           the directories, cleans up, and optionally restarts.
+        3. Launch the helper and return – the caller should quit the app.
+
+        On other platforms we do the swap in-process.
+
+        The zip should contain ``MagnetoClip.exe`` and ``_internal/`` at the
+        root level.
         """
         if not zip_path.is_file():
             log.warning("update_install_file_not_found", path=str(zip_path))
@@ -125,28 +135,90 @@ class UpdateDownloader:
             install_dir = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path.cwd()
             log.info("update_install_dir", path=str(install_dir))
 
-            backup_dir = install_dir.parent / "MagnetoClip_backup"
-            if backup_dir.exists():
-                shutil.rmtree(backup_dir)
-
-            install_dir.rename(backup_dir)
-            log.info("update_backup_created", path=str(backup_dir))
-
-            install_dir.mkdir(parents=True, exist_ok=True)
-
+            staging_dir = Path(tempfile.mkdtemp(prefix="magnetoclip_update_"))
             with zipfile.ZipFile(zip_path, "r") as zf:
-                zf.extractall(install_dir)
-                log.info("update_extracted", path=str(install_dir))
+                zf.extractall(staging_dir)
+            log.info("update_staging_extracted", path=str(staging_dir))
 
-            self._cleanup_backup(backup_dir)
-
-            log.info("update_installed", path=str(install_dir))
-            return True
+            if sys.platform == "win32":
+                return self._launch_swap_batch(install_dir, staging_dir)
+            else:
+                return self._swap_direct(install_dir, staging_dir)
 
         except Exception as exc:
             log.warning("update_install_failed", exc_info=True)
-            self._restore_backup(backup_dir, install_dir)
             return False
+
+    # ------------------------------------------------------------------
+    # Windows – out-of-process swap via a helper batch script
+    # ------------------------------------------------------------------
+
+    def _launch_swap_batch(self, install_dir: Path, staging_dir: Path) -> bool:
+        """Write and launch a ``.bat`` that swaps old ↔ new files after the app exits."""
+        import subprocess
+
+        bat_path = staging_dir / "_swap.bat"
+        exe_name = "MagnetoClip.exe"
+
+        # The batch script:
+        #   1. Waits until MagnetoClip.exe is no longer running.
+        #   2. Removes old _internal/ and the old exe.
+        #   3. Copies fresh files from staging into the install dir.
+        #   4. Cleans up the staging directory and itself.
+        #   5. Restarts the application.
+        bat_content = (
+            "@echo off\r\n"
+            "REM --- wait for MagnetoClip to exit ---\r\n"
+            ":wait_loop\r\n"
+            "timeout /t 1 /nobreak >nul\r\n"
+            f'tasklist /FI "IMAGENAME eq {exe_name}" 2>NUL | find /I "{exe_name}" >NUL\r\n'
+            "if %ERRORLEVEL% == 0 goto wait_loop\r\n"
+            "\r\n"
+            "REM --- remove old files ---\r\n"
+            f'rmdir /s /q "{install_dir}\\_internal"\r\n'
+            f'del /f /q "{install_dir}\\{exe_name}" 2>NUL\r\n'
+            "\r\n"
+            "REM --- copy new files ---\r\n"
+            f'xcopy /s /e /y /q "{staging_dir}\\*" "{install_dir}\\" >NUL\r\n'
+            "\r\n"
+            "REM --- cleanup ---\r\n"
+            f'rmdir /s /q "{staging_dir}"\r\n'
+            "\r\n"
+            "REM --- restart ---\r\n"
+            f'start "" "{install_dir}\\{exe_name}"\r\n'
+        )
+
+        bat_path.write_text(bat_content, encoding="ascii")
+        log.info("update_batch_created", path=str(bat_path))
+
+        subprocess.Popen(
+            ["cmd", "/c", str(bat_path)],
+            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
+        )
+        log.info("update_batch_launched")
+        return True
+
+    # ------------------------------------------------------------------
+    # Unix – in-process swap (files are not locked)
+    # ------------------------------------------------------------------
+
+    def _swap_direct(self, install_dir: Path, staging_dir: Path) -> bool:
+        """Swap directories in-process (safe on Linux / macOS)."""
+        backup_dir = install_dir.parent / "MagnetoClip_backup"
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir)
+
+        install_dir.rename(backup_dir)
+        log.info("update_backup_created", path=str(backup_dir))
+
+        shutil.copytree(staging_dir, install_dir)
+        log.info("update_files_copied", path=str(install_dir))
+
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        shutil.rmtree(backup_dir, ignore_errors=True)
+
+        log.info("update_installed", path=str(install_dir))
+        return True
 
     def _verify_sha256(self, file_path: Path, expected_hash: str) -> bool:
         """Verify the SHA256 hash of a file."""
