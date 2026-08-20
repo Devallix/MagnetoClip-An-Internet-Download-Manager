@@ -152,6 +152,57 @@ class SettingsPage(Page):
         self.streaming_quality_combo.addItem("Audio only", "audio")
         form.addRow("Streaming media quality", self.streaming_quality_combo)
 
+        form.addRow("", QLabel(""))
+
+        torrent_label = QLabel("Torrent")
+        torrent_label.setObjectName("page_subtitle")
+        form.addRow(torrent_label)
+
+        self.torrent_enable_dht_check = QCheckBox("Enable DHT (Distributed Hash Table)")
+        form.addRow("", self.torrent_enable_dht_check)
+
+        self.torrent_enable_pex_check = QCheckBox("Enable PEX (Peer Exchange)")
+        form.addRow("", self.torrent_enable_pex_check)
+
+        self.torrent_enable_encryption_check = QCheckBox("Enable encryption")
+        form.addRow("", self.torrent_enable_encryption_check)
+
+        self.torrent_listen_port_spin = QSpinBox()
+        self.torrent_listen_port_spin.setRange(1024, 65535)
+        form.addRow("Listen port", self.torrent_listen_port_spin)
+
+        self.torrent_max_connections_spin = QSpinBox()
+        self.torrent_max_connections_spin.setRange(10, 1000)
+        form.addRow("Max connections", self.torrent_max_connections_spin)
+
+        self.torrent_max_uploads_spin = QSpinBox()
+        self.torrent_max_uploads_spin.setRange(1, 100)
+        form.addRow("Max upload slots", self.torrent_max_uploads_spin)
+
+        self.torrent_default_sequential_check = QCheckBox("Download sequentially by default")
+        form.addRow("", self.torrent_default_sequential_check)
+
+        self.torrent_auto_seed_check = QCheckBox("Auto-seed after download completes")
+        form.addRow("", self.torrent_auto_seed_check)
+
+        self.torrent_file_association_check = QCheckBox(
+            "Register MagnetoClip to open .torrent files on Windows"
+        )
+        form.addRow("", self.torrent_file_association_check)
+
+        self.torrent_magnet_protocol_check = QCheckBox(
+            "Register MagnetoClip to handle magnet: links on Windows"
+        )
+        form.addRow("", self.torrent_magnet_protocol_check)
+
+        torrent_dir_row = QHBoxLayout()
+        self.torrent_save_dir_edit = QLineEdit()
+        torrent_dir_row.addWidget(self.torrent_save_dir_edit, 1)
+        torrent_browse = QPushButton("Browse\u2026")
+        torrent_browse.clicked.connect(self._browse_torrent_dir)
+        torrent_dir_row.addWidget(torrent_browse)
+        form.addRow("Default torrent save folder", torrent_dir_row)
+
         proxy_label = QLabel("Proxy")
         proxy_label.setObjectName("page_subtitle")
         layout.addWidget(proxy_label)
@@ -257,6 +308,19 @@ class SettingsPage(Page):
         )
         index = self.streaming_quality_combo.findData(str(s.get("streaming.quality", "best")))
         self.streaming_quality_combo.setCurrentIndex(max(0, index))
+
+        self.torrent_enable_dht_check.setChecked(bool(s.get("torrent.enable_dht", True)))
+        self.torrent_enable_pex_check.setChecked(bool(s.get("torrent.enable_pex", True)))
+        self.torrent_enable_encryption_check.setChecked(bool(s.get("torrent.enable_encryption", True)))
+        self.torrent_listen_port_spin.setValue(int(s.get("torrent.listen_port", 6881)))
+        self.torrent_max_connections_spin.setValue(int(s.get("torrent.max_connections", 200)))
+        self.torrent_max_uploads_spin.setValue(int(s.get("torrent.max_uploads", 4)))
+        self.torrent_default_sequential_check.setChecked(bool(s.get("torrent.default_sequential", False)))
+        self.torrent_auto_seed_check.setChecked(bool(s.get("torrent.auto_seed", False)))
+        self.torrent_save_dir_edit.setText(str(s.get("torrent.default_save_dir", "")))
+        self.torrent_file_association_check.setChecked(bool(s.get("torrent.file_association", False)))
+        self.torrent_magnet_protocol_check.setChecked(bool(s.get("torrent.magnet_protocol", False)))
+
         self._load_proxy_combo()
 
         self.updates_check_enabled.setChecked(bool(s.get("updates.check_enabled", True)))
@@ -271,6 +335,11 @@ class SettingsPage(Page):
         directory = QFileDialog.getExistingDirectory(self, "Default download folder")
         if directory:
             self.directory_edit.setText(directory)
+
+    def _browse_torrent_dir(self) -> None:
+        directory = QFileDialog.getExistingDirectory(self, "Default torrent save folder")
+        if directory:
+            self.torrent_save_dir_edit.setText(directory)
 
     def _load_proxy_combo(self) -> None:
         self.proxy_combo.clear()
@@ -463,6 +532,34 @@ class SettingsPage(Page):
             "streaming.quality",
             self.streaming_quality_combo.currentData() or "best",
         )
+
+        s.set("torrent.enable_dht", self.torrent_enable_dht_check.isChecked())
+        s.set("torrent.enable_pex", self.torrent_enable_pex_check.isChecked())
+        s.set("torrent.enable_encryption", self.torrent_enable_encryption_check.isChecked())
+        s.set("torrent.listen_port", self.torrent_listen_port_spin.value())
+        s.set("torrent.max_connections", self.torrent_max_connections_spin.value())
+        s.set("torrent.max_uploads", self.torrent_max_uploads_spin.value())
+        s.set("torrent.default_sequential", self.torrent_default_sequential_check.isChecked())
+        s.set("torrent.auto_seed", self.torrent_auto_seed_check.isChecked())
+        s.set("torrent.default_save_dir", self.torrent_save_dir_edit.text())
+        s.set("torrent.file_association", self.torrent_file_association_check.isChecked())
+
+        if self.torrent_file_association_check.isChecked():
+            from magnetoclip.torrent.file_association import register
+            register()
+        else:
+            from magnetoclip.torrent.file_association import unregister
+            unregister()
+
+        s.set("torrent.magnet_protocol", self.torrent_magnet_protocol_check.isChecked())
+
+        if self.torrent_magnet_protocol_check.isChecked():
+            from magnetoclip.torrent.file_association import register_magnet
+            register_magnet()
+        else:
+            from magnetoclip.torrent.file_association import unregister_magnet
+            unregister_magnet()
+
         s.set("network.default_proxy_id", self.proxy_combo.currentData() or 0)
 
         s.set("updates.check_enabled", self.updates_check_enabled.isChecked())

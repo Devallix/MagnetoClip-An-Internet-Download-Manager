@@ -22,6 +22,7 @@ _NAV_FILES = {
     "detected": "tag",
     "queue": "list",
     "completed": "checkmark",
+    "torrents": "download",
     "scheduler": "clock",
     "analytics": "statistics",
     "browser": "internet",
@@ -49,6 +50,7 @@ _TYPE_FILES = {
     "font": "document",
     "archive": "cardboard-box",
     "software": "monitor",
+    "torrent": "download",
     "other": "question-mark",
 }
 
@@ -59,6 +61,7 @@ _TYPE_COLORS = {
     "document": "#60A5FA",
     "archive": "#FBBF24",
     "software": "#34D399",
+    "torrent": "#4ADE80",
     "other": "#94A3B8",
 }
 

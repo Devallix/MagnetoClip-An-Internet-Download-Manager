@@ -11,6 +11,7 @@ CATEGORY_ORDER = [
     "document",
     "archive",
     "software",
+    "torrent",
     "other",
 ]
 
@@ -21,6 +22,7 @@ CATEGORY_LABELS = {
     "document": "Document",
     "archive": "Compressed",
     "software": "App / Software",
+    "torrent": "Torrent",
     "other": "Other",
 }
 
@@ -31,6 +33,7 @@ _TYPES: dict[str, frozenset[str]] = {
     "document": frozenset({"document", "ebook", "subtitle", "font"}),
     "archive": frozenset({"archive"}),
     "software": frozenset({"software"}),
+    "torrent": frozenset({"torrent"}),
     "other": frozenset({"unknown"}),
 }
 

@@ -79,6 +79,23 @@ def build_context(
     from magnetoclip.browser.service import BrowserIntegrationService
 
     context.browser = BrowserIntegrationService(context)
+
+    from magnetoclip.torrent.client import ClientConfig, TorrentClient, available as torrent_available
+
+    if torrent_available():
+        try:
+            cfg = ClientConfig(
+                listen_port=int(settings.get("torrent.listen_port", 6881)),
+                enable_dht=bool(settings.get("torrent.enable_dht", True)),
+                enable_pex=bool(settings.get("torrent.enable_pex", True)),
+                enable_encryption=bool(settings.get("torrent.enable_encryption", True)),
+                max_connections=int(settings.get("torrent.max_connections", 200)),
+                max_uploads=int(settings.get("torrent.max_uploads", 4)),
+            )
+            context.torrent_client = TorrentClient(cfg)
+        except Exception:
+            context.torrent_client = None
+
     return context
 
 

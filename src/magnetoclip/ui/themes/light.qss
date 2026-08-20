@@ -446,6 +446,7 @@ QToolButton#tool_button[tint="add"] { color: $success; }
 QToolButton#tool_button[tint="start"] { color: $accent_blue; }
 QToolButton#tool_button[tint="pause"] { color: $warning; }
 QToolButton#tool_button[tint="remove"] { color: $danger; }
+QToolButton#tool_button[tint="upload"] { color: $accent_cyan; }
 
 QToolButton#tool_button[role="danger"]:hover {
     background-color: rgba(220, 38, 38, 0.1);

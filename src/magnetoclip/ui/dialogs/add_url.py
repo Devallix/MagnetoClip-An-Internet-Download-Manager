@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from magnetoclip.media.streaming import is_audio_platform, is_streaming_url
+from magnetoclip.torrent.detect import is_torrent_url
 
 
 class AddUrlDialog(QDialog):
@@ -155,12 +156,14 @@ class AddUrlDialog(QDialog):
             # blob: URLs only exist inside a browser page; MagnetoClip asks the
             # extension to fetch the bytes from the page that created them.
             return None
+        if is_torrent_url(url):
+            return None
         try:
             parsed = httpx.URL(url)
         except Exception:
             return "That doesn't look like a valid URL."
         if parsed.scheme not in ("http", "https") or not parsed.host:
-            return "Only http://, https:// and blob: URLs are supported."
+            return "Only http://, https://, blob:, and magnet: URLs are supported."
         return None
 
     def _on_url_changed(self, text: str) -> None:

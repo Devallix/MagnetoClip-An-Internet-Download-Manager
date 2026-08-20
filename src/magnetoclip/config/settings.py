@@ -16,6 +16,21 @@ DEFAULTS: dict[str, Any] = {
     "downloads.auto_categorize": True,
     # Streaming (embedded/online media via yt-dlp)
     "streaming.quality": "best",
+    # Torrent
+    "torrent.default_save_dir": "",
+    "torrent.listen_port": 6881,
+    "torrent.enable_dht": True,
+    "torrent.enable_pex": True,
+    "torrent.enable_encryption": True,
+    "torrent.max_upload_speed": 0,
+    "torrent.max_download_speed": 0,
+    "torrent.max_connections": 200,
+    "torrent.max_uploads": 4,
+    "torrent.default_sequential": False,
+    "torrent.auto_seed": False,
+    "torrent.search_sites": ["yts"],
+    "torrent.file_association": False,
+    "torrent.magnet_protocol": False,
     # Network
     "network.user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "network.timeout_seconds": 30,

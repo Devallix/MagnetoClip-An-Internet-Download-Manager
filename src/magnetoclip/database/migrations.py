@@ -92,6 +92,33 @@ def _migration_006_browser_requests(engine: Engine) -> None:
     BrowserRequest.__table__.create(engine, checkfirst=True)
 
 
+def _migration_007_torrent_columns(engine: Engine) -> None:
+    """Add torrent-specific columns to the downloads table (guarded)."""
+    columns = {column["name"] for column in inspect(engine).get_columns("downloads")}
+    with engine.begin() as conn:
+        torrent_columns = [
+            ("torrent_info_hash", "VARCHAR(40)"),
+            ("torrent_num_peers", "INTEGER"),
+            ("torrent_num_seeds", "INTEGER"),
+            ("torrent_num_pieces", "INTEGER"),
+            ("torrent_piece_size", "INTEGER"),
+            ("torrent_sequential", "BOOLEAN DEFAULT 0"),
+            ("torrent_seeding", "BOOLEAN DEFAULT 0"),
+        ]
+        for col_name, col_type in torrent_columns:
+            if col_name not in columns:
+                conn.execute(
+                    text(f"ALTER TABLE downloads ADD COLUMN {col_name} {col_type}")
+                )
+
+
+def _migration_008_torrent_search_history(engine: Engine) -> None:
+    """Add the torrent search history table."""
+    from .models import TorrentSearchHistory
+
+    TorrentSearchHistory.__table__.create(engine, checkfirst=True)
+
+
 MIGRATIONS: list[Migration] = [
     _migration_001_create_all,
     _migration_002_media_columns,
@@ -99,6 +126,8 @@ MIGRATIONS: list[Migration] = [
     _migration_004_pending_capture_cookies,
     _migration_005_pending_capture_data,
     _migration_006_browser_requests,
+    _migration_007_torrent_columns,
+    _migration_008_torrent_search_history,
 ]
 
 

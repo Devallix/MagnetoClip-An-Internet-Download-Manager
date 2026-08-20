@@ -7,6 +7,7 @@ structlog==26.1.0
 aiofiles==25.1.0
 yt-dlp==2026.07.04
 cryptography==50.0.0
+libtorrent==2.0.13
 
 # Dev / test
 pytest==9.1.1

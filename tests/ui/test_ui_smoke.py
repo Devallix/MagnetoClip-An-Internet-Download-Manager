@@ -38,7 +38,7 @@ def test_main_window_constructs(qtbot, context):
     qtbot.addWidget(window)
     assert window.windowTitle() == "MagnetoClip 0.1.2"
     assert window.sidebar is not None
-    assert window.stack.count() == 9
+    assert window.stack.count() == 10
 
 
 def test_navigation_switches_pages(qtbot, context):
@@ -151,7 +151,7 @@ def test_categories_page_removed(qtbot, context):
     qtbot.addWidget(window)
     assert "categories" not in window._nav_buttons
     assert "Categories" not in window._pages
-    assert window.stack.count() == 9
+    assert window.stack.count() == 10
 
 
 def test_sidebar_toggle_collapses(qtbot, context):
@@ -239,7 +239,8 @@ def test_icons_load_from_bundled_assets(qtbot):
     )
 
     for name in ("overview", "downloads", "queue", "completed", "scheduler",
-                 "analytics", "browser", "settings", "about", "all", "menu"):
+                 "analytics", "browser", "settings", "about", "all", "menu",
+                 "torrents"):
         assert not nav_icon(name).isNull(), name
     for name in ("add", "start", "pause", "remove"):
         assert not tool_icon(name).isNull(), name
@@ -263,6 +264,8 @@ def test_add_url_dialog_rejects_unsupported_schemes(qtbot, context):
     assert AddUrlDialog._url_error("http://example.com/a.bin") is None
     # blob: URLs are accepted (content is fetched via the browser extension).
     assert AddUrlDialog._url_error("blob:https://web.telegram.org/55d2a84a-91c1-4b2e") is None
+    # magnet: URIs are accepted for torrent downloads.
+    assert AddUrlDialog._url_error("magnet:?xt=urn:btih:abc123") is None
     assert AddUrlDialog._url_error("ftp://example.com/x.zip")
     assert AddUrlDialog._url_error("not-a-url")
     # The dialog stays open and shows the message instead of crashing the app.

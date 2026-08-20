@@ -22,6 +22,7 @@ DEFAULT_CATEGORIES: list[dict[str, Any]] = [
     {"name": "Images", "folder": "Pictures", "icon": "image", "color": "#F0AD4E"},
     {"name": "Software", "folder": "Downloads", "icon": "code", "color": "#7E57C2"},
     {"name": "Archives", "folder": "Downloads", "icon": "archive", "color": "#78909C"},
+    {"name": "Torrent", "folder": "Torrents", "icon": "download", "color": "#4ADE80"},
     {"name": "Other", "folder": "Downloads", "icon": "file", "color": "#95A5A6"},
 ]
 

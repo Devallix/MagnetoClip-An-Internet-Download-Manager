@@ -39,6 +39,17 @@ from ...media.streaming import (
 from ...network.http.client import ClientConfig
 from ...security.safe_names import safe_join, sanitize_filename
 from ...services.logging import get_logger
+from ...torrent.client import TorrentClient, available as torrent_available
+from ...torrent.detect import is_torrent_url, is_magnet_link, is_torrent_file_url
+from ...torrent.handler import TorrentDownloadHandler
+from ...torrent.resume import (
+    TorrentResumeState,
+    has_resume as has_torrent_resume,
+    load_resume as load_torrent_resume,
+    save_resume as save_torrent_resume,
+    sidecar_path_for as torrent_sidecar_path,
+)
+from ...torrent.types import TorrentSpec
 from ..events.bus import Events
 
 log = get_logger(__name__)
@@ -91,6 +102,10 @@ class DownloadManager:
         self._predictor = SpeedPredictor()
         self._etas: dict[int, float | None] = {}
         self._stream_cancel: dict[int, threading.Event] = {}
+        self._torrent_handlers: dict[int, TorrentDownloadHandler] = {}
+        self._pending_torrent_opts: dict[int, dict] = {}
+        self._torrent_client: TorrentClient | None = None
+        self._init_torrent_client()
 
         self.events.connect(Events.DOWNLOAD_STATE_CHANGED, self._on_state_changed)
         self.events.connect(Events.PROGRESS_UPDATED, self._on_progress)
@@ -100,6 +115,29 @@ class DownloadManager:
         self.events.connect(Events.SETTINGS_CHANGED, self._on_settings_changed)
 
         self._apply_bandwidth()
+
+    def _init_torrent_client(self) -> None:
+        """Initialize the torrent client singleton if libtorrent is available."""
+        if not torrent_available():
+            log.info("torrent_unavailable")
+            return
+        try:
+            from ...torrent.client import ClientConfig as TConfig
+
+            config = TConfig(
+                listen_port=int(self.settings.get("torrent.listen_port", 6881)),
+                enable_dht=bool(self.settings.get("torrent.enable_dht", True)),
+                enable_pex=bool(self.settings.get("torrent.enable_pex", True)),
+                enable_encryption=bool(
+                    self.settings.get("torrent.enable_encryption", True)
+                ),
+                max_connections=int(self.settings.get("torrent.max_connections", 200)),
+                max_uploads=int(self.settings.get("torrent.max_uploads", 4)),
+            )
+            self._torrent_client = TorrentClient(config)
+        except Exception as exc:
+            log.warning("torrent_client_init_failed", error=str(exc))
+            self._torrent_client = None
 
     # ----- creation -----
 
@@ -131,11 +169,14 @@ class DownloadManager:
         """
         if data is None:
             self._validate_url(url)
+        torrent = is_torrent_url(url)
         name = sanitize_filename(filename) if filename else self._derive_name(url)
         category = None
         if category_name:
             category = self.categories.get_by_name(category_name)
-        streaming = is_streaming_url(url)
+        if torrent and self.settings.get("downloads.auto_categorize", True):
+            category = self.categories.get_by_name("Torrent")
+        streaming = not torrent and is_streaming_url(url)
         stream_kind = None
         if streaming and self.settings.get("downloads.auto_categorize", True):
             stream_kind = "audio" if is_audio_platform(url) else "video"
@@ -181,7 +222,14 @@ class DownloadManager:
                 download.completed_at = datetime.now(UTC)
             from ...media.detect import detect_type
 
-            if stream_kind:
+            if torrent:
+                download.detected_type = "torrent"
+                if is_magnet_link(url):
+                    download.torrent_info_hash = ""
+                download.torrent_sequential = bool(
+                    self.settings.get("torrent.default_sequential", False)
+                )
+            elif stream_kind:
                 download.detected_type = stream_kind
             else:
                 download.detected_type = detect_type(filename=final_path.name, url=url)
@@ -203,6 +251,9 @@ class DownloadManager:
             or download.status == DownloadStatus.completed
         ):
             return False
+
+        if is_torrent_url(download.url) or download.detected_type == "torrent":
+            return self._start_torrent(download_id)
 
         if is_streaming_url(download.url):
             return self._start_streaming(download_id)
@@ -247,15 +298,30 @@ class DownloadManager:
             self._stream_cancel[download_id].set()
             self._update_db_status(download_id, DownloadStatus.paused)
             return
+        if download_id in self._torrent_handlers:
+            handler = self._torrent_handlers.get(download_id)
+            if handler is not None:
+                try:
+                    handler.pause()
+                except Exception as exc:
+                    log.warning("torrent_pause_handler_error", download_id=download_id, error=str(exc))
+            self._update_db_status(download_id, DownloadStatus.paused)
+            return
         self.core.pause(download_id)
         self._update_db_status(download_id, DownloadStatus.paused)
 
     def resume(self, download_id: int) -> None:
         if download_id in self._stream_cancel:
-            # A streaming download is still winding down from pause (the yt-dlp
-            # thread has not yet observed the cancel event). Restarting now
-            # races the task teardown, so retry once it has fully stopped.
             self._schedule_stream_restart(download_id)
+            return
+        if download_id in self._torrent_handlers:
+            handler = self._torrent_handlers.get(download_id)
+            if handler is not None:
+                try:
+                    handler.resume()
+                except Exception as exc:
+                    log.warning("torrent_resume_handler_error", download_id=download_id, error=str(exc))
+            self._update_db_status(download_id, DownloadStatus.downloading)
             return
         task = self.core.get(download_id)
         if task is not None:
@@ -263,6 +329,21 @@ class DownloadManager:
             self._update_db_status(download_id, DownloadStatus.downloading)
         else:
             self.start(download_id)
+
+    def start_seeding(self, download_id: int) -> None:
+        """Resume a completed torrent for seeding."""
+        try:
+            with self.session_factory() as session:
+                repo = DownloadRepository(session)
+                download = repo.get(download_id)
+                if download is None:
+                    return
+                download.status = DownloadStatus.downloading
+                download.torrent_seeding = True
+                session.commit()
+            self.start(download_id)
+        except Exception as exc:
+            log.warning("torrent_start_seeding_error", download_id=download_id, error=str(exc))
 
     def _schedule_stream_restart(self, download_id: int) -> None:
         try:
@@ -286,6 +367,13 @@ class DownloadManager:
             if remove_file:
                 self._delete_parts(download_id)
             return
+        if download_id in self._torrent_handlers:
+            handler = self._torrent_handlers.get(download_id)
+            if handler is not None:
+                handler.cancel()
+            if remove_file:
+                self._delete_parts(download_id)
+            return
         self.core.cancel(download_id)
         if remove_file:
             self._delete_parts(download_id)
@@ -296,6 +384,10 @@ class DownloadManager:
         if task is not None:
             if download_id in self._stream_cancel:
                 self._stream_cancel[download_id].set()
+            elif download_id in self._torrent_handlers:
+                handler = self._torrent_handlers.get(download_id)
+                if handler is not None:
+                    handler.cancel()
             else:
                 self.core.cancel(download_id)
             await asyncio.gather(task, return_exceptions=True)
@@ -323,6 +415,10 @@ class DownloadManager:
             if download_id in self._tasks:
                 if download_id in self._stream_cancel:
                     self._stream_cancel[download_id].set()
+                elif download_id in self._torrent_handlers:
+                    handler = self._torrent_handlers.get(download_id)
+                    if handler is not None:
+                        handler.cancel()
                 else:
                     self.core.cancel(download_id)
             self._delete_parts(download_id)
@@ -569,6 +665,194 @@ class DownloadManager:
         self._post_notification("completed", snapshot)
         self._advance_queues_for(download_id)
         self._inspect_media_async(download_id)
+
+    # ----- torrent execution -----
+
+    def _start_torrent(self, download_id: int) -> bool:
+        """Start a torrent download via the TorrentDownloadHandler."""
+        if self._torrent_client is None:
+            self._init_torrent_client()
+        if self._torrent_client is None:
+            log.warning("torrent_client_not_available", download_id=download_id)
+            self._fail_torrent(
+                download_id,
+                "libtorrent is not installed. Install it with: pip install libtorrent",
+            )
+            return False
+
+        with self.session_factory() as session:
+            repo = DownloadRepository(session)
+            download = repo.get(download_id)
+            if download is not None and download.status not in (
+                DownloadStatus.paused,
+                DownloadStatus.queued,
+                DownloadStatus.scheduled,
+            ):
+                download.status = DownloadStatus.scheduled
+                session.commit()
+
+        task = asyncio.create_task(self._run_torrent(download_id))
+        self._tasks[download_id] = task
+        task.add_done_callback(lambda _: self._tasks.pop(download_id, None))
+        return True
+
+    async def _run_torrent(self, download_id: int) -> None:
+        """Download a torrent via the TorrentDownloadHandler, mirroring events
+        into the normal progress/state pipeline."""
+        async with self.semaphore:
+            try:
+                with self.session_factory() as session:
+                    download = DownloadRepository(session).get(download_id)
+                    if download is None:
+                        return
+                    spec = self._build_torrent_spec(download)
+                    save_dir = Path(spec.save_dir)
+                    save_dir.mkdir(parents=True, exist_ok=True)
+
+                self.events.post(
+                    Events.DOWNLOAD_STATE_CHANGED,
+                    {"id": download_id, "state": "connecting"},
+                )
+
+                handler = TorrentDownloadHandler(
+                    client=self._torrent_client,
+                    bus=self.events,
+                    spec=spec,
+                )
+                self._torrent_handlers[download_id] = handler
+                result = await handler.run()
+                self._finalize_torrent(download_id, result, handler)
+            except Exception as exc:
+                log.warning(
+                    "torrent_download_failed",
+                    download_id=download_id,
+                    error=str(exc),
+                )
+                self._fail_torrent(download_id, str(exc))
+            finally:
+                self._torrent_handlers.pop(download_id, None)
+
+    def _build_torrent_spec(self, download: Download) -> TorrentSpec:
+        """Build a TorrentSpec from a Download record."""
+        url = download.url
+        save_dir = Path(download.save_path).parent if download.save_path else Path(
+            self.settings.get("torrent.default_save_dir", "")
+            or self.settings.get("downloads.default_directory", str(Path.home() / "Downloads"))
+        )
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        opts = self._pending_torrent_opts.pop(download.id, {})
+        sequential = opts.get("sequential", bool(download.torrent_sequential))
+        if sequential is None:
+            sequential = bool(self.settings.get("torrent.default_sequential", False))
+        seed = opts.get("seed_mode", bool(self.settings.get("torrent.auto_seed", False)))
+
+        if is_magnet_link(url):
+            return TorrentSpec(
+                download_id=download.id,
+                save_dir=save_dir,
+                filename=download.filename or "torrent_download",
+                magnet_uri=url,
+                sequential=sequential,
+                seed_mode=seed,
+            )
+
+        local_path = Path(url) if url else Path()
+        if is_torrent_file_url(url) and not local_path.is_file():
+            torrent_path = self._download_torrent_file(url, save_dir)
+            return TorrentSpec(
+                download_id=download.id,
+                save_dir=save_dir,
+                filename=download.filename or Path(url).name,
+                torrent_file_path=torrent_path,
+                sequential=sequential,
+                seed_mode=seed,
+            )
+
+        if is_torrent_file_url(url) and local_path.is_file():
+            return TorrentSpec(
+                download_id=download.id,
+                save_dir=save_dir,
+                filename=download.filename or local_path.name,
+                torrent_file_path=str(local_path),
+                sequential=sequential,
+                seed_mode=seed,
+            )
+
+        lower = url.strip().lower()
+        if lower.startswith(("http://", "https://")):
+            torrent_path = self._download_torrent_file(url, save_dir)
+            return TorrentSpec(
+                download_id=download.id,
+                save_dir=save_dir,
+                filename=download.filename or "torrent_download",
+                torrent_file_path=torrent_path,
+                sequential=sequential,
+                seed_mode=seed,
+            )
+
+        return TorrentSpec(
+            download_id=download.id,
+            save_dir=save_dir,
+            filename=download.filename or "torrent_download",
+            torrent_file_path=None,
+            sequential=sequential,
+            seed_mode=seed,
+        )
+
+    def _download_torrent_file(self, url: str, dest_dir: Path) -> Path:
+        """Download a .torrent file from *url* into *dest_dir* and return the path."""
+        import uuid
+
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        torrent_path = dest_dir / f".torrent_{uuid.uuid4().hex[:12]}.tmp"
+        with httpx.Client(follow_redirects=True, timeout=30) as client:
+            resp = client.get(url)
+            resp.raise_for_status()
+            torrent_path.write_bytes(resp.content)
+        return torrent_path
+
+    def _fail_torrent(self, download_id: int, error: str) -> None:
+        with self.session_factory() as session:
+            repo = DownloadRepository(session)
+            download = repo.get(download_id)
+            if download is None:
+                return
+            download.status = DownloadStatus.failed
+            download.error = error
+            session.commit()
+            snapshot = self.snapshot_item(download)
+        self.events.post(Events.DOWNLOAD_UPDATED, snapshot)
+        self._post_notification("failed", snapshot)
+        self._advance_queues_for(download_id)
+
+    def _finalize_torrent(
+        self, download_id: int, result: str, handler: TorrentDownloadHandler
+    ) -> None:
+        with self.session_factory() as session:
+            repo = DownloadRepository(session)
+            download = repo.get(download_id)
+            if download is None:
+                return
+            status = handler._state if result == "completed" else result
+            if result == "completed":
+                download.status = DownloadStatus.completed
+                download.completed_at = _now()
+                download.torrent_seeding = handler._state == "seeding"
+            elif result == "failed":
+                download.status = DownloadStatus.failed
+                download.error = handler.error or "torrent download failed"
+            elif result == "stopped":
+                download.status = DownloadStatus.stopped
+            session.commit()
+            download = repo.get(download_id)
+            snapshot = self.snapshot_item(download) if download else {"id": download_id}
+        self.events.post(Events.DOWNLOAD_UPDATED, snapshot)
+        if result == "completed":
+            self._post_notification("completed", snapshot)
+        elif result == "failed":
+            self._post_notification("failed", snapshot)
+        self._advance_queues_for(download_id)
 
     def _db_status_is(self, download_id: int, status: DownloadStatus) -> bool:
         with self.session_factory() as session:
@@ -902,6 +1186,8 @@ class DownloadManager:
 
     @staticmethod
     def _validate_url(url: str) -> None:
+        if is_torrent_url(url):
+            return
         try:
             parsed = httpx.URL(url)
         except Exception as exc:
@@ -974,6 +1260,13 @@ class DownloadManager:
             "completed_at": download.completed_at.isoformat() if download.completed_at else None,
             "error": download.error,
             "category_id": download.category_id,
+            "torrent_info_hash": download.torrent_info_hash,
+            "torrent_num_peers": download.torrent_num_peers,
+            "torrent_num_seeds": download.torrent_num_seeds,
+            "torrent_num_pieces": download.torrent_num_pieces,
+            "torrent_piece_size": download.torrent_piece_size,
+            "torrent_sequential": download.torrent_sequential,
+            "torrent_seeding": download.torrent_seeding,
         }
 
     def list_snapshots(self, **filters: Any) -> list[dict[str, Any]]:

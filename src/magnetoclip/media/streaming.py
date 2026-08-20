@@ -87,6 +87,8 @@ def _is_bot_wall_error(message: str) -> bool:
             "unusual traffic",
             "request has been throttled",
             "too many requests",
+            "403",
+            "forbidden",
         )
     )
 
@@ -215,16 +217,28 @@ def resolve_stream(
         "socket_timeout": timeout,
         "nocheckcertificate": True,
         "format": selector,
+        "extractor_args": {"youtube": {"player_client": ["android"]}},
     }
     # Try anonymously first: passing browser cookies can trigger a degraded
     # player response for some sessions. Only retry with cookies when the
     # anonymous attempt is blocked by an auth/bot wall.
     info = None
-    for attempt_cookies in ((None,) if not cookies else (None, cookies)):
-        cookiefile = _write_cookiefile(url, attempt_cookies)
+    browser_name = _detect_browser()
+    if cookies:
+        attempts = (None, cookies)
+    elif browser_name:
+        attempts = (None, "_browser_")
+    else:
+        attempts = (None,)
+
+    for attempt_cookies in attempts:
+        use_cookies = attempt_cookies if attempt_cookies != "_browser_" else None
+        cookiefile = _write_cookiefile(url, use_cookies)
         params = dict(base_params)
         if cookiefile is not None:
             params["cookiefile"] = str(cookiefile)
+        elif attempt_cookies == "_browser_" and browser_name:
+            params["cookiesfrombrowser"] = (browser_name,)
         try:
             try:
                 with YoutubeDL(params) as ydl:
@@ -233,7 +247,7 @@ def resolve_stream(
                 message = str(exc)
                 can_retry = (
                     attempt_cookies is None
-                    and bool(cookies)
+                    and (bool(cookies) or browser_name)
                     and _is_bot_wall_error(message)
                 )
                 if not can_retry:
@@ -269,6 +283,45 @@ def resolve_stream(
         webpage_url=info.get("webpage_url") or url,
         formats=info.get("formats") or [],
     )
+
+
+def _detect_browser() -> str | None:
+    """Return first installed browser name for yt-dlp cookiesfrombrowser, or None.
+
+    Checks both PATH and common Windows install directories.
+    """
+    import os
+    import shutil
+
+    candidates = [
+        ("chrome", "chrome.exe"),
+        ("edge", "msedge.exe"),
+        ("firefox", "firefox.exe"),
+        ("brave", "brave.exe"),
+        ("opera", "opera.exe"),
+        ("vivaldi", "vivaldi.exe"),
+    ]
+    local_app = os.environ.get("LOCALAPPDATA", "")
+    program_files = os.environ.get("PROGRAMFILES", "")
+    program_files_x86 = os.environ.get("PROGRAMFILES(X86)", "")
+    extra_dirs = []
+    for base in (local_app, program_files, program_files_x86):
+        if base:
+            extra_dirs.append(base)
+            extra_dirs.append(os.path.join(base, "Google"))
+            extra_dirs.append(os.path.join(base, "Microsoft"))
+            extra_dirs.append(os.path.join(base, "BraveSoftware"))
+            extra_dirs.append(os.path.join(base, "Opera Software"))
+            extra_dirs.append(os.path.join(base, "Vivaldi"))
+
+    for name, exe in candidates:
+        if shutil.which(exe):
+            return name
+        for d in extra_dirs:
+            path = os.path.join(d, exe)
+            if os.path.isfile(path):
+                return name
+    return None
 
 
 def download_stream(
@@ -327,17 +380,31 @@ def download_stream(
         "fragment_retries": 3,
         "concurrent_fragment_downloads": 4,
         "progress_hooks": hooks,
+        "extractor_args": {"youtube": {"player_client": ["android"]}},
     }
     if not _ffmpeg_available():
         base_params["merge_output_format"] = None
 
     # Anonymous first, cookies as a bot-wall fallback (see resolve_stream).
     info = None
-    for attempt_cookies in ((None,) if not cookies else (None, cookies)):
-        cookiefile = _write_cookiefile(url, attempt_cookies)
+    browser_name = _detect_browser()
+    # Build attempt list: anonymous first, then explicit cookies, then
+    # cookiesfrombrowser as a last resort when no explicit cookies exist.
+    if cookies:
+        attempts = (None, cookies)
+    elif browser_name:
+        attempts = (None, "_browser_")
+    else:
+        attempts = (None,)
+
+    for attempt_cookies in attempts:
+        use_cookies = attempt_cookies if attempt_cookies != "_browser_" else None
+        cookiefile = _write_cookiefile(url, use_cookies)
         params = dict(base_params)
         if cookiefile is not None:
             params["cookiefile"] = str(cookiefile)
+        elif attempt_cookies == "_browser_" and browser_name:
+            params["cookiesfrombrowser"] = (browser_name,)
         try:
             try:
                 with YoutubeDL(params) as ydl:
@@ -348,7 +415,7 @@ def download_stream(
                 message = str(exc)
                 can_retry = (
                     attempt_cookies is None
-                    and bool(cookies)
+                    and (bool(cookies) or browser_name)
                     and _is_bot_wall_error(message)
                 )
                 if not can_retry:

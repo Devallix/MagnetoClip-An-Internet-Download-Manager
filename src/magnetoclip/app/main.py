@@ -29,6 +29,15 @@ from magnetoclip.version import __version__
 log = get_logger(__name__)
 
 BROWSER_HOST_FLAG = "--browser-host"
+_IPC_SERVER_NAME = "magnetoclip-ipc"
+
+
+def _extract_magnet_uri(argv: list[str]) -> str | None:
+    """Return the first magnet: URI found in *argv*, or ``None``."""
+    for arg in argv[1:]:
+        if arg.lower().startswith("magnet:?") and not arg.startswith("-"):
+            return arg
+    return None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -46,8 +55,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     context = build_context()
     log.info("application_starting", version=__version__)
 
+    if context.settings.get("torrent.file_association", False):
+        from magnetoclip.torrent.file_association import is_registered, register
+        if not is_registered():
+            register()
+
+    if context.settings.get("torrent.magnet_protocol", False):
+        from magnetoclip.torrent.file_association import (
+            is_magnet_registered,
+            register_magnet,
+        )
+        if not is_magnet_registered():
+            register_magnet()
+
     lock = acquire_single_instance_lock(context.data_dir)
     if lock is None:
+        magnet_uri = _extract_magnet_uri(argv)
+        torrent_file = _find_torrent_arg(argv)
+        payload = magnet_uri or torrent_file
+        if payload and _forward_to_running_instance(payload):
+            log.info("forwarded_to_running_instance", payload=payload[:80])
+            return 0
         QMessageBox.information(None, "MagnetoClip", "MagnetoClip is already running.")
         return 1
 
@@ -55,6 +83,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     asyncio.set_event_loop(loop)
 
     window = MainWindow(context)
+
+    torrent_file_arg = _find_torrent_arg(argv)
+    magnet_uri_arg = _extract_magnet_uri(argv)
 
     if context.settings.get("browser.integration_enabled", False):
         try:
@@ -79,6 +110,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         splash.close_with_fade()
         window.show()
         log.info("main_window_shown")
+
+        _start_ipc_server(window)
+
+        if magnet_uri_arg:
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(500, lambda: _open_torrent_file(window, magnet_uri_arg))
+
+        if torrent_file_arg:
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(500, lambda: _open_torrent_file(window, torrent_file_arg))
 
         if context.settings.get("updates.check_enabled", True):
             from PySide6.QtCore import QThread, Signal
@@ -173,6 +214,81 @@ def _browser_host_main(argv: Sequence[str]) -> int:
         loop.close()
     log.info("browser_host_stopped")
     return 0
+
+
+def _find_torrent_arg(argv: list[str]) -> str | None:
+    """Return the first .torrent file path found in *argv*, or ``None``."""
+    for arg in argv[1:]:
+        if arg.lower().endswith(".torrent") and not arg.startswith("-"):
+            return arg
+    return None
+
+
+def _forward_to_running_instance(payload: str) -> bool:
+    """Try to send *payload* (magnet URI or .torrent path) to a running instance.
+
+    Returns ``True`` if the message was delivered.
+    """
+    from PySide6.QtNetwork import QLocalSocket
+
+    socket = QLocalSocket()
+    socket.connectToServer(_IPC_SERVER_NAME)
+    if not socket.waitForConnected(2000):
+        return False
+    data = payload.encode("utf-8")
+    socket.write(data)
+    socket.waitForBytesWritten(2000)
+    socket.disconnectFromServer()
+    return True
+
+
+def _start_ipc_server(window) -> None:
+    """Create a QLocalServer that receives forwarded URIs from duplicate instances."""
+    from PySide6.QtNetwork import QLocalServer
+
+    server = QLocalServer(window)
+    # Remove any stale server from a previous crash
+    QLocalServer.removeServer(_IPC_SERVER_NAME)
+    if not server.listen(_IPC_SERVER_NAME):
+        log.warning("ipc_server_listen_failed", error=server.errorString())
+        return
+
+    def _on_new_connection() -> None:
+        while socket := server.nextPendingConnection():
+            if socket.waitForReadyRead(3000):
+                raw = socket.readAll().data().decode("utf-8", errors="replace")
+                if raw:
+                    log.info("ipc_received", payload=raw[:80])
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(100, lambda url=raw: _open_torrent_file(window, url))
+            socket.deleteLater()
+
+    server.newConnection.connect(_on_new_connection)
+    # prevent GC
+    window._ipc_server = server
+
+
+def _open_torrent_file(window, torrent_path: str) -> None:
+    """Open the AddTorrentDialog for a .torrent file or magnet URI."""
+    from magnetoclip.ui.dialogs.add_torrent import AddTorrentDialog
+
+    try:
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        window._activate_nav("torrents")
+        dialog = AddTorrentDialog(window.context, parent=window, url=torrent_path)
+        if dialog.exec():
+            window.context.manager.add(
+                url=dialog.url(),
+                category_name=dialog.category() or None,
+                queue_id=dialog.queue_id(),
+            )
+            window.context.manager.start(
+                window.context.manager.list_snapshots(limit=1)[-1]["id"]
+            )
+    except Exception as exc:
+        log.warning("torrent_file_open_failed", error=str(exc))
 
 
 if __name__ == "__main__":

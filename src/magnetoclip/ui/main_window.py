@@ -40,6 +40,7 @@ from .pages import (
     QueuePage,
     SchedulerPage,
     SettingsPage,
+    TorrentsPage,
 )
 from .themes import apply_theme
 from .util import format_speed
@@ -54,6 +55,7 @@ NAV_ITEMS = [
     ("detected", "Detected"),
     ("queue", "Queue"),
     ("completed", "Completed"),
+    ("torrents", "Torrents"),
     ("scheduler", "Scheduler"),
     ("analytics", "Analytics"),
     ("browser", "Browser"),
@@ -279,6 +281,7 @@ class MainWindow(QMainWindow):
             "Detected": lambda: DetectedPage(context),
             "Queue": lambda: QueuePage(context),
             "Completed": lambda: DownloadsPage(context, completed_only=True),
+            "Torrents": lambda: TorrentsPage(context),
             "Scheduler": lambda: SchedulerPage(context),
             "Analytics": lambda: AnalyticsPage(context),
             "Browser": lambda: BrowserPage(context),

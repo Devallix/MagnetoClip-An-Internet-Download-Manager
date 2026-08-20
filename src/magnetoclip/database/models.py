@@ -145,6 +145,15 @@ class Download(Base):
     error: Mapped[Optional[str]] = mapped_column(Text)
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
 
+    # Torrent-specific columns
+    torrent_info_hash: Mapped[Optional[str]] = mapped_column(String(40))
+    torrent_num_peers: Mapped[Optional[int]] = mapped_column(Integer)
+    torrent_num_seeds: Mapped[Optional[int]] = mapped_column(Integer)
+    torrent_num_pieces: Mapped[Optional[int]] = mapped_column(Integer)
+    torrent_piece_size: Mapped[Optional[int]] = mapped_column(Integer)
+    torrent_sequential: Mapped[bool] = mapped_column(Boolean, default=False)
+    torrent_seeding: Mapped[bool] = mapped_column(Boolean, default=False)
+
     category: Mapped[Optional[Category]] = relationship(back_populates="downloads")
     queue: Mapped[Optional[Queue]] = relationship(back_populates="downloads")
     proxy_profile: Mapped[Optional[ProxyProfile]] = relationship(
@@ -286,3 +295,13 @@ class Setting(Base):
 
     key: Mapped[str] = mapped_column(String(255), primary_key=True)
     value_json: Mapped[Optional[object]] = mapped_column(JSON)
+
+
+class TorrentSearchHistory(Base):
+    __tablename__ = "torrent_search_history"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    query: Mapped[str] = mapped_column(String(512), nullable=False)
+    site: Mapped[str] = mapped_column(String(64), nullable=False)
+    results_json: Mapped[Optional[dict]] = mapped_column(JSON)
+    ts: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

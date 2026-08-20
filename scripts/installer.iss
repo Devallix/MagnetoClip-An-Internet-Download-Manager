@@ -2,7 +2,7 @@
 ; Compile with: ISCC.exe scripts/installer.iss  (run from project root)
 
 #define MyAppName "MagnetoClip"
-#define MyAppVersion "0.1.2"
+#define MyAppVersion "0.2.0"
 #define MyAppPublisher "MagnetoClip"
 #define MyAppExeName "MagnetoClip.exe"
 

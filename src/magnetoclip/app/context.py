@@ -32,6 +32,7 @@ class AppContext:
     analytics: object = None
     notifier: object = None
     browser: object = None
+    torrent_client: object = None
 
     def __post_init__(self) -> None:
         self.session_factory = self.database.Session
@@ -46,6 +47,12 @@ class AppContext:
                 await scheduler.stop()
             except Exception:
                 log.warning("scheduler_stop_failed", exc_info=True)
+        torrent_client = getattr(self, "torrent_client", None)
+        if torrent_client is not None:
+            try:
+                await torrent_client.shutdown()
+            except Exception:
+                log.warning("torrent_client_shutdown_failed", exc_info=True)
         analytics = getattr(self, "analytics", None)
         if analytics is not None:
             try:

@@ -10,6 +10,7 @@ from .overview import OverviewPage
 from .queue import QueuePage
 from .scheduler import SchedulerPage
 from .settings import SettingsPage
+from .torrents import TorrentsPage
 
 __all__ = [
     "AnalyticsPage",
@@ -20,4 +21,5 @@ __all__ = [
     "QueuePage",
     "SchedulerPage",
     "SettingsPage",
+    "TorrentsPage",
 ]
