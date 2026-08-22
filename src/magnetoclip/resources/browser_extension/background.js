@@ -746,7 +746,16 @@ if (chrome.webRequest) {
         return;
       }
       const sourceHost = hostOf(source);
-      if (!sourceHost.endsWith("telegram.org") || !source.includes("/k/stream/")) {
+      if (!sourceHost.endsWith("telegram.org")) {
+        return;
+      }
+      // Web K proxies media through /k/stream/, Web A through /a/stream/ and
+      // same-origin /api/files/ parts; all resolve to real CDN files.
+      if (
+        !source.includes("/k/stream/") &&
+        !source.includes("/stream/") &&
+        !source.includes("/api/files/")
+      ) {
         return;
       }
       if (webReportedUrls.has(target)) {

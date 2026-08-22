@@ -15,7 +15,6 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -65,49 +64,6 @@ class ProxyProfile(Base):
     downloads: Mapped[list["Download"]] = relationship(back_populates="proxy_profile")
 
 
-class Schedule(Base):
-    __tablename__ = "schedules"
-
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
-    start_time: Mapped[Optional[str]] = mapped_column(String(5))  # HH:MM
-    end_time: Mapped[Optional[str]] = mapped_column(String(5))    # HH:MM
-    days_mask: Mapped[int] = mapped_column(Integer, default=0b1111111)
-    speed_day: Mapped[Optional[float]] = mapped_column(Float)     # MB/s
-    speed_night: Mapped[Optional[float]] = mapped_column(Float)   # MB/s
-    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
-
-    queues: Mapped[list["Queue"]] = relationship(back_populates="schedule")
-
-
-class Queue(Base):
-    __tablename__ = "queues"
-
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
-    max_concurrent: Mapped[int] = mapped_column(Integer, default=3)
-    schedule_id: Mapped[Optional[int]] = mapped_column(ForeignKey("schedules.id"))
-
-    schedule: Mapped[Optional[Schedule]] = relationship(back_populates="queues")
-    items: Mapped[list["QueueItem"]] = relationship(
-        back_populates="queue", cascade="all, delete-orphan"
-    )
-    downloads: Mapped[list["Download"]] = relationship(back_populates="queue")
-
-
-class QueueItem(Base):
-    __tablename__ = "queue_items"
-    __table_args__ = (UniqueConstraint("queue_id", "download_id"),)
-
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    queue_id: Mapped[int] = mapped_column(ForeignKey("queues.id"), nullable=False)
-    download_id: Mapped[int] = mapped_column(ForeignKey("downloads.id"), nullable=False)
-    position: Mapped[int] = mapped_column(Integer, default=0)
-
-    queue: Mapped[Queue] = relationship(back_populates="items")
-    download: Mapped["Download"] = relationship(back_populates="queue_item")
-
-
 class Download(Base):
     __tablename__ = "downloads"
 
@@ -116,7 +72,6 @@ class Download(Base):
     filename: Mapped[Optional[str]] = mapped_column(String(1024))
     save_path: Mapped[Optional[str]] = mapped_column(String(4096))
     category_id: Mapped[Optional[int]] = mapped_column(ForeignKey("categories.id"))
-    queue_id: Mapped[Optional[int]] = mapped_column(ForeignKey("queues.id"))
     size_total: Mapped[Optional[int]] = mapped_column(BigInteger)
     size_downloaded: Mapped[int] = mapped_column(BigInteger, default=0)
     status: Mapped[DownloadStatus] = mapped_column(
@@ -155,12 +110,8 @@ class Download(Base):
     torrent_seeding: Mapped[bool] = mapped_column(Boolean, default=False)
 
     category: Mapped[Optional[Category]] = relationship(back_populates="downloads")
-    queue: Mapped[Optional[Queue]] = relationship(back_populates="downloads")
     proxy_profile: Mapped[Optional[ProxyProfile]] = relationship(
         back_populates="downloads"
-    )
-    queue_item: Mapped[Optional[QueueItem]] = relationship(
-        back_populates="download", uselist=False
     )
     segments: Mapped[list["DownloadSegment"]] = relationship(
         back_populates="download", cascade="all, delete-orphan"

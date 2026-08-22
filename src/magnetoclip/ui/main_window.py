@@ -37,8 +37,6 @@ from .pages import (
     DetectedPage,
     DownloadsPage,
     OverviewPage,
-    QueuePage,
-    SchedulerPage,
     SettingsPage,
     TorrentsPage,
 )
@@ -53,10 +51,8 @@ NAV_ITEMS = [
     ("overview", "Overview"),
     ("downloads", "Downloads"),
     ("detected", "Detected"),
-    ("queue", "Queue"),
     ("completed", "Completed"),
     ("torrents", "Torrents"),
-    ("scheduler", "Scheduler"),
     ("analytics", "Analytics"),
     ("browser", "Browser"),
     ("settings", "Settings"),
@@ -279,10 +275,8 @@ class MainWindow(QMainWindow):
             "Overview": lambda: OverviewPage(context),
             "Downloads": lambda: DownloadsPage(context),
             "Detected": lambda: DetectedPage(context),
-            "Queue": lambda: QueuePage(context),
             "Completed": lambda: DownloadsPage(context, completed_only=True),
             "Torrents": lambda: TorrentsPage(context),
-            "Scheduler": lambda: SchedulerPage(context),
             "Analytics": lambda: AnalyticsPage(context),
             "Browser": lambda: BrowserPage(context),
             "Settings": lambda: SettingsPage(context),
@@ -429,7 +423,7 @@ class MainWindow(QMainWindow):
 
     def _on_network_changed(self, payload) -> None:
         if not isinstance(payload, str):
-            return  # bandwidth override payloads (e.g. from the scheduler)
+            return  # dict payloads carry bandwidth overrides
         self.network_label.setText(f"● {payload}")
 
     def _on_speed(self, payload) -> None:

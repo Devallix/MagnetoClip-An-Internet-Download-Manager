@@ -4,7 +4,6 @@ from magnetoclip.database.models import DownloadStatus
 from magnetoclip.database.repositories import (
     BrowserRequestRepository,
     DownloadRepository,
-    ScheduleRepository,
     SettingsStore,
 )
 from magnetoclip.database.session import Database
@@ -18,9 +17,6 @@ def test_migrations_create_full_schema(tmp_path):
         "downloads",
         "download_segments",
         "categories",
-        "queues",
-        "queue_items",
-        "schedules",
         "settings",
         "browser_events",
         "download_statistics",
@@ -29,6 +25,7 @@ def test_migrations_create_full_schema(tmp_path):
         "pending_captures",
         "browser_detections",
         "browser_requests",
+        "torrent_search_history",
         "schema_version",
     ):
         assert inspector.has_table(table), f"missing table {table}"
@@ -97,56 +94,15 @@ def test_settings_store_roundtrip(tmp_path):
     db.close()
 
 
-def test_schedule_crud(tmp_path):
+def test_schedule_crud_removed(tmp_path):
+    """Legacy queue/schedule tables must be dropped by migration 009."""
     db = Database(tmp_path / "test.db")
     db.initialize()
-    repo = ScheduleRepository(db.Session())
-
-    schedule = repo.add(
-        "Night",
-        start_time="22:00",
-        end_time="06:00",
-        days_mask=0b1111100,
-        speed_day=2.5,
-        speed_night=1.0,
-        enabled=True,
-    )
-    assert schedule.id is not None
-    assert schedule.days_mask == 0b1111100
-    assert schedule.enabled is True
-
-    loaded = repo.get(schedule.id)
-    assert loaded.name == "Night"
-    assert loaded.start_time == "22:00"
-    assert loaded.end_time == "06:00"
-    assert loaded.speed_day == 2.5
-
-    assert [s.id for s in repo.list()] == [schedule.id]
-    db.close()
-
-
-def test_schedule_update_can_clear_fields(tmp_path):
-    db = Database(tmp_path / "test.db")
-    db.initialize()
-    repo = ScheduleRepository(db.Session())
-    schedule = repo.add("Windowed", start_time="22:00", end_time="06:00")
-
-    updated = repo.update(
-        schedule.id,
-        name="AllDay",
-        start_time=None,
-        end_time=None,
-        speed_day=5.0,
-        enabled=True,
-    )
-    assert updated.name == "AllDay"
-    assert updated.start_time is None
-    assert updated.end_time is None
-    assert updated.speed_day == 5.0
-    assert updated.enabled is True
-
-    repo.remove(updated)
-    assert repo.get(updated.id) is None
+    inspector = inspect(db.engine)
+    for table in ("queues", "queue_items", "schedules"):
+        assert not inspector.has_table(table), f"table {table} should be gone"
+    columns = {c["name"] for c in inspector.get_columns("downloads")}
+    assert "queue_id" not in columns
     db.close()
 
 

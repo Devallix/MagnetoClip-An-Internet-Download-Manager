@@ -1,4 +1,4 @@
-QMainWindow, QWidget#content, QDialog, QWidget#page {
+﻿QMainWindow, QWidget#content, QDialog, QWidget#page {
     background-color: $bg;
     color: $text;
 }
@@ -419,9 +419,7 @@ QToolButton#nav_button:checked {
 
 QToolButton#nav_button[tint="overview"] { color: #7C3AED; }
 QToolButton#nav_button[tint="downloads"] { color: #2563EB; }
-QToolButton#nav_button[tint="queue"] { color: #0891B2; }
 QToolButton#nav_button[tint="completed"] { color: #059669; }
-QToolButton#nav_button[tint="scheduler"] { color: #D97706; }
 QToolButton#nav_button[tint="analytics"] { color: #DB2777; }
 QToolButton#nav_button[tint="categories"] { color: #6366F1; }
 QToolButton#nav_button[tint="browser"] { color: #0284C7; }

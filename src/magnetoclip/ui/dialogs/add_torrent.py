@@ -153,13 +153,6 @@ class AddTorrentDialog(QDialog):
         if torrent_idx >= 0:
             self.category_combo.setCurrentIndex(torrent_idx)
         cat_row.addWidget(self.category_combo)
-        cat_row.addSpacing(16)
-        cat_row.addWidget(QLabel("Queue"))
-        self.queue_combo = QComboBox()
-        self.queue_combo.addItem("None", None)
-        for q in getattr(getattr(context, "queues", None), "list", list)():
-            self.queue_combo.addItem(q.name, q.id)
-        cat_row.addWidget(self.queue_combo)
         cat_row.addStretch(1)
         opts_lay.addLayout(cat_row)
 
@@ -357,9 +350,6 @@ class AddTorrentDialog(QDialog):
 
     def category(self) -> str | None:
         return self.category_combo.currentText()
-
-    def queue_id(self) -> int | None:
-        return self.queue_combo.currentData()
 
     def sequential(self) -> bool:
         return self.sequential_check.isChecked()

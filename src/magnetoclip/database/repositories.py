@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload, sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
 from .models import (
     BrowserDetection,
@@ -15,13 +15,8 @@ from .models import (
     DownloadStatus,
     PendingCapture,
     ProxyProfile,
-    Queue,
-    QueueItem,
-    Schedule,
     Setting,
 )
-
-_UNSET = object()
 
 
 class DownloadRepository:
@@ -37,7 +32,6 @@ class DownloadRepository:
         filename: str | None = None,
         save_path: str | None = None,
         category_id: int | None = None,
-        queue_id: int | None = None,
         priority: int = 0,
         connections_max: int = 8,
         headers: dict[str, Any] | None = None,
@@ -51,7 +45,6 @@ class DownloadRepository:
             filename=filename,
             save_path=save_path,
             category_id=category_id,
-            queue_id=queue_id,
             priority=priority,
             connections_max=connections_max,
             headers_json=headers,
@@ -141,166 +134,6 @@ class CategoryRepository:
     def remove(self, category: Category) -> None:
         self.session.delete(category)
         self.session.commit()
-
-
-class QueueRepository:
-    def __init__(self, session: Session) -> None:
-        self.session = session
-
-    def list(self) -> list[Queue]:
-        return list(self.session.scalars(select(Queue).order_by(Queue.name)).all())
-
-    def get(self, queue_id: int) -> Optional[Queue]:
-        return self.session.get(Queue, queue_id)
-
-    def add(self, name: str, *, max_concurrent: int = 3) -> Queue:
-        queue = Queue(name=name, max_concurrent=max_concurrent)
-        self.session.add(queue)
-        self.session.commit()
-        self.session.refresh(queue)
-        return queue
-
-    def update(
-        self,
-        queue_id: int,
-        *,
-        name: str | None = None,
-        max_concurrent: int | None = None,
-    ) -> Queue:
-        queue = self.session.get(Queue, queue_id)
-        if queue is None:
-            raise KeyError(queue_id)
-        if name is not None:
-            queue.name = name
-        if max_concurrent is not None:
-            queue.max_concurrent = max_concurrent
-        self.session.commit()
-        self.session.refresh(queue)
-        return queue
-
-    def remove(self, queue: Queue) -> None:
-        self.session.delete(queue)
-        self.session.commit()
-
-    def items(self, queue_id: int) -> list[QueueItem]:
-        return list(
-            self.session.scalars(
-                select(QueueItem)
-                .where(QueueItem.queue_id == queue_id)
-                .options(selectinload(QueueItem.download))
-                .order_by(QueueItem.position, QueueItem.id)
-            ).all()
-        )
-
-    def add_item(self, queue_id: int, download_id: int) -> QueueItem:
-        position = len(self.items(queue_id))
-        item = QueueItem(queue_id=queue_id, download_id=download_id, position=position)
-        self.session.add(item)
-        self.session.commit()
-        self.session.refresh(item)
-        return item
-
-    def remove_item(self, queue_id: int, download_id: int) -> None:
-        item = self.session.scalar(
-            select(QueueItem).where(
-                QueueItem.queue_id == queue_id,
-                QueueItem.download_id == download_id,
-            )
-        )
-        if item is not None:
-            self.session.delete(item)
-            self.session.commit()
-
-    def reorder(self, queue_id: int, ordered_ids: list[int]) -> None:
-        items = self.items(queue_id)
-        by_id = {item.download_id: item for item in items}
-        for position, download_id in enumerate(ordered_ids):
-            item = by_id.get(download_id)
-            if item is not None:
-                item.position = position
-        self.session.commit()
-
-    def queue_ids_for_download(self, download_id: int) -> list[int]:
-        return list(
-            self.session.scalars(
-                select(QueueItem.queue_id).where(
-                    QueueItem.download_id == download_id
-                )
-            ).all()
-        )
-
-
-class ScheduleRepository:
-    def __init__(self, session: Session) -> None:
-        self.session = session
-
-    def list(self) -> list[Schedule]:
-        return list(self.session.scalars(select(Schedule).order_by(Schedule.id)).all())
-
-    def get(self, schedule_id: int) -> Optional[Schedule]:
-        return self.session.get(Schedule, schedule_id)
-
-    def add(
-        self,
-        name: str,
-        *,
-        start_time: str | None = None,
-        end_time: str | None = None,
-        days_mask: int = 0b1111111,
-        speed_day: float | None = None,
-        speed_night: float | None = None,
-        enabled: bool = False,
-    ) -> Schedule:
-        schedule = Schedule(
-            name=name,
-            start_time=start_time,
-            end_time=end_time,
-            days_mask=days_mask,
-            speed_day=speed_day,
-            speed_night=speed_night,
-            enabled=enabled,
-        )
-        self.session.add(schedule)
-        self.session.commit()
-        self.session.refresh(schedule)
-        return schedule
-
-    def remove(self, schedule: Schedule) -> None:
-        self.session.delete(schedule)
-        self.session.commit()
-
-    def update(
-        self,
-        schedule_id: int,
-        *,
-        name: Any = _UNSET,
-        start_time: Any = _UNSET,
-        end_time: Any = _UNSET,
-        days_mask: Any = _UNSET,
-        speed_day: Any = _UNSET,
-        speed_night: Any = _UNSET,
-        enabled: Any = _UNSET,
-    ) -> Schedule:
-        schedule = self.session.get(Schedule, schedule_id)
-        if schedule is None:
-            raise KeyError(schedule_id)
-        if name is not _UNSET:
-            schedule.name = name
-        if start_time is not _UNSET:
-            schedule.start_time = start_time
-        if end_time is not _UNSET:
-            schedule.end_time = end_time
-        if days_mask is not _UNSET:
-            schedule.days_mask = days_mask
-        if speed_day is not _UNSET:
-            schedule.speed_day = speed_day
-        if speed_night is not _UNSET:
-            schedule.speed_night = speed_night
-        if enabled is not _UNSET:
-            schedule.enabled = enabled
-        self.session.commit()
-        self.session.refresh(schedule)
-        return schedule
 
 
 class ProxyRepository:

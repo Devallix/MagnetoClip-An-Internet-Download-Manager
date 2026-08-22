@@ -179,6 +179,20 @@ class SettingsPage(Page):
         self.torrent_max_uploads_spin.setRange(1, 100)
         form.addRow("Max upload slots", self.torrent_max_uploads_spin)
 
+        self.torrent_max_active_torrents_spin = QSpinBox()
+        self.torrent_max_active_torrents_spin.setRange(1, 100)
+        self.torrent_max_active_torrents_spin.setToolTip(
+            "How many unfinished torrents may hold a place in the torrent queue."
+        )
+        form.addRow("Maximum number of active torrents", self.torrent_max_active_torrents_spin)
+
+        self.torrent_max_active_downloads_spin = QSpinBox()
+        self.torrent_max_active_downloads_spin.setRange(1, 100)
+        self.torrent_max_active_downloads_spin.setToolTip(
+            "How many torrents may download at the same time; the rest wait in queue."
+        )
+        form.addRow("Maximum number of active downloads", self.torrent_max_active_downloads_spin)
+
         self.torrent_default_sequential_check = QCheckBox("Download sequentially by default")
         form.addRow("", self.torrent_default_sequential_check)
 
@@ -315,6 +329,12 @@ class SettingsPage(Page):
         self.torrent_listen_port_spin.setValue(int(s.get("torrent.listen_port", 6881)))
         self.torrent_max_connections_spin.setValue(int(s.get("torrent.max_connections", 200)))
         self.torrent_max_uploads_spin.setValue(int(s.get("torrent.max_uploads", 4)))
+        self.torrent_max_active_torrents_spin.setValue(
+            int(s.get("torrent.max_active_torrents", 5))
+        )
+        self.torrent_max_active_downloads_spin.setValue(
+            int(s.get("torrent.max_active_downloads", 3))
+        )
         self.torrent_default_sequential_check.setChecked(bool(s.get("torrent.default_sequential", False)))
         self.torrent_auto_seed_check.setChecked(bool(s.get("torrent.auto_seed", False)))
         self.torrent_save_dir_edit.setText(str(s.get("torrent.default_save_dir", "")))
@@ -540,6 +560,14 @@ class SettingsPage(Page):
         s.set("torrent.listen_port", self.torrent_listen_port_spin.value())
         s.set("torrent.max_connections", self.torrent_max_connections_spin.value())
         s.set("torrent.max_uploads", self.torrent_max_uploads_spin.value())
+        s.set(
+            "torrent.max_active_torrents",
+            self.torrent_max_active_torrents_spin.value(),
+        )
+        s.set(
+            "torrent.max_active_downloads",
+            self.torrent_max_active_downloads_spin.value(),
+        )
         s.set("torrent.default_sequential", self.torrent_default_sequential_check.isChecked())
         s.set("torrent.auto_seed", self.torrent_auto_seed_check.isChecked())
         s.set("torrent.default_save_dir", self.torrent_save_dir_edit.text())

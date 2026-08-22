@@ -28,9 +28,11 @@ DEFAULTS: dict[str, Any] = {
     "torrent.max_uploads": 4,
     "torrent.default_sequential": False,
     "torrent.auto_seed": False,
+    "torrent.max_active_torrents": 5,
+    "torrent.max_active_downloads": 3,
     "torrent.search_sites": ["yts"],
-    "torrent.file_association": False,
-    "torrent.magnet_protocol": False,
+    "torrent.file_association": True,
+    "torrent.magnet_protocol": True,
     # Network
     "network.user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "network.timeout_seconds": 30,
@@ -45,8 +47,6 @@ DEFAULTS: dict[str, Any] = {
     "browser.confirm_capture": True,
     "browser.notify_downloadable": True,
     "browser.skip_all_until": "",
-    # Scheduler
-    "scheduler.enabled": False,
     # Appearance
     "appearance.theme": "dark",
     "appearance.accent": "#8B5CF6",

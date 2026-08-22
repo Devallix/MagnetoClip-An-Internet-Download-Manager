@@ -25,10 +25,8 @@ class AppContext:
     log_dir: Path
     session_factory: sessionmaker[Session] = field(init=False)
     categories: object = None
-    queues: object = None
     proxies: object = None
     manager: object = None
-    scheduler: object = None
     analytics: object = None
     notifier: object = None
     browser: object = None
@@ -41,12 +39,6 @@ class AppContext:
         return self.session_factory()
 
     async def shutdown(self) -> None:
-        scheduler = getattr(self, "scheduler", None)
-        if scheduler is not None:
-            try:
-                await scheduler.stop()
-            except Exception:
-                log.warning("scheduler_stop_failed", exc_info=True)
         torrent_client = getattr(self, "torrent_client", None)
         if torrent_client is not None:
             try:

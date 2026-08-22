@@ -292,7 +292,6 @@ class DownloadsPage(Page):
                 filename=dialog.filename() or None,
                 save_dir=dialog.directory() or None,
                 category_name=dialog.category() or None,
-                queue_id=dialog.queue_id(),
                 connections_max=dialog.connections() or None,
                 proxy_profile_id=dialog.proxy_profile_id(),
                 auth_username=dialog.auth_username(),

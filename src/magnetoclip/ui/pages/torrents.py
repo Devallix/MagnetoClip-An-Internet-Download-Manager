@@ -160,7 +160,6 @@ class TorrentsPage(Page):
             kwargs: dict[str, Any] = {
                 "url": dialog.url(),
                 "category_name": dialog.category() or None,
-                "queue_id": dialog.queue_id(),
             }
             if dialog.filename():
                 kwargs["filename"] = dialog.filename()
@@ -179,20 +178,21 @@ class TorrentsPage(Page):
                         rec.detected_type = "torrent"
                         session.commit()
 
-            if is_torrent_url(download.url):
-                manager._pending_torrent_opts[download.id] = {
-                    "sequential": dialog.sequential(),
-                    "seed_mode": dialog.seed_mode(),
-                }
-                with manager.session_factory() as session:
-                    from magnetoclip.database.repositories import DownloadRepository
+            manager._pending_torrent_opts[download.id] = {
+                "sequential": dialog.sequential(),
+                "seed_mode": dialog.seed_mode(),
+            }
+            with manager.session_factory() as session:
+                from magnetoclip.database.repositories import DownloadRepository
 
-                    rec = DownloadRepository(session).get(download.id)
-                    if rec is not None:
-                        rec.torrent_sequential = dialog.sequential()
-                        session.commit()
+                rec = DownloadRepository(session).get(download.id)
+                if rec is not None:
+                    rec.torrent_sequential = dialog.sequential()
+                    session.commit()
 
-            manager.start(download.id)
+            # Torrents always flow through the global torrent queue; it
+            # starts them as soon as a download slot is available.
+            manager.torrent_queue.admit_and_advance()
         except ValueError as exc:
             QMessageBox.warning(self, "Cannot Add Torrent", str(exc))
 
@@ -296,6 +296,10 @@ class TorrentsPage(Page):
             self.table.item(row, 6).setText(format_eta(eta))
         elif status == "paused":
             self.table.item(row, 2).setText("Paused")
+            self.table.item(row, 4).setText("--")
+            self.table.item(row, 6).setText("--")
+        elif status == "scheduled":
+            self.table.item(row, 2).setText("Waiting")
             self.table.item(row, 4).setText("--")
             self.table.item(row, 6).setText("--")
         elif status == "completed":
@@ -410,28 +414,28 @@ class TorrentsPage(Page):
         menu = QMenu(self.table)
         if status in ACTIVE:
             menu.addAction("Pause").triggered.connect(
-                lambda did=download_id: self.context.manager.pause(did)
+                lambda checked=False, did=download_id: self.context.manager.pause(did)
             )
         elif status == "paused":
             menu.addAction("Resume").triggered.connect(
-                lambda did=download_id: self.context.manager.resume(did)
+                lambda checked=False, did=download_id: self.context.manager.resume(did)
             )
         elif status == "completed":
             menu.addAction("Start Seeding").triggered.connect(
-                lambda did=download_id: self.context.manager.start_seeding(did)
+                lambda checked=False, did=download_id: self.context.manager.start_seeding(did)
             )
         else:
             menu.addAction("Start").triggered.connect(
-                lambda did=download_id: self.context.manager.start(did)
+                lambda checked=False, did=download_id: self.context.manager.start(did)
             )
 
         menu.addSeparator()
         menu.addAction("Copy URL").triggered.connect(
-            lambda did=download_id: self._copy_url(did)
+            lambda checked=False, did=download_id: self._copy_url(did)
         )
         remove = menu.addAction("Remove")
         remove.triggered.connect(
-            lambda did=download_id: self.context.manager.remove(did)
+            lambda checked=False, did=download_id: self.context.manager.remove(did)
         )
         menu.exec(self.table.viewport().mapToGlobal(pos))
 

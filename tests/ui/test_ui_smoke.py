@@ -6,6 +6,7 @@ from magnetoclip.core.events.bus import Events
 from magnetoclip.ui.dialogs.add_url import AddUrlDialog
 from magnetoclip.ui.main_window import MainWindow
 from magnetoclip.ui.themes import build_qss
+from magnetoclip.version import __version__
 
 
 @pytest.fixture
@@ -36,9 +37,9 @@ def test_table_header_sections_have_borders(qapp):
 def test_main_window_constructs(qtbot, context):
     window = MainWindow(context)
     qtbot.addWidget(window)
-    assert window.windowTitle() == "MagnetoClip 0.1.2"
+    assert window.windowTitle() == f"MagnetoClip {__version__}"
     assert window.sidebar is not None
-    assert window.stack.count() == 10
+    assert window.stack.count() == 8
 
 
 def test_navigation_switches_pages(qtbot, context):
@@ -98,6 +99,22 @@ def test_settings_save_shows_feedback(qtbot, context):
     assert page.save_feedback.text() == "Settings saved"
 
 
+def test_settings_torrent_queue_limits_roundtrip(qtbot, context):
+    window = MainWindow(context)
+    qtbot.addWidget(window)
+    window._activate("Settings")
+    page = window._pages["Settings"]
+    assert context.settings.get("torrent.max_active_torrents") == 5
+    assert context.settings.get("torrent.max_active_downloads") == 3
+
+    page.torrent_max_active_torrents_spin.setValue(7)
+    page.torrent_max_active_downloads_spin.setValue(2)
+    page.save()
+
+    assert context.settings.get("torrent.max_active_torrents") == 7
+    assert context.settings.get("torrent.max_active_downloads") == 2
+
+
 def test_network_event_updates_status_label(qtbot, context):
     window = MainWindow(context)
     qtbot.addWidget(window)
@@ -151,7 +168,15 @@ def test_categories_page_removed(qtbot, context):
     qtbot.addWidget(window)
     assert "categories" not in window._nav_buttons
     assert "Categories" not in window._pages
-    assert window.stack.count() == 10
+    assert window.stack.count() == 8
+
+
+def test_queue_and_scheduler_pages_removed(qtbot, context):
+    window = MainWindow(context)
+    qtbot.addWidget(window)
+    for key in ("queue", "scheduler", "Queue", "Scheduler"):
+        assert key not in window._nav_buttons
+        assert key not in window._pages
 
 
 def test_sidebar_toggle_collapses(qtbot, context):
@@ -238,9 +263,8 @@ def test_icons_load_from_bundled_assets(qtbot):
         type_icon,
     )
 
-    for name in ("overview", "downloads", "queue", "completed", "scheduler",
-                 "analytics", "browser", "settings", "about", "all", "menu",
-                 "torrents"):
+    for name in ("overview", "downloads", "completed", "analytics",
+                 "browser", "settings", "about", "all", "menu", "torrents"):
         assert not nav_icon(name).isNull(), name
     for name in ("add", "start", "pause", "remove"):
         assert not tool_icon(name).isNull(), name
@@ -292,71 +316,6 @@ def test_about_dialog_constructs(qtbot):
     dialog = AboutDialog()
     qtbot.addWidget(dialog)
     assert "About" in dialog.windowTitle()
-
-
-def test_queue_page_shows_empty_state(qtbot, context):
-    window = MainWindow(context)
-    qtbot.addWidget(window)
-    window._activate("Queue")
-    page = window._pages["Queue"]
-    assert not page.table.isHidden()
-    assert page.table.rowCount() == 1
-    assert page.table.item(0, 1).text() == (
-        "No queues yet. Add a queue to organize your downloads."
-    )
-    assert not page.start_button.isEnabled()
-
-
-def test_queue_page_renders_queues(qtbot, context):
-    context.queues.add("Work", max_concurrent=2)
-    context.queues.add("Media", max_concurrent=5)
-    window = MainWindow(context)
-    qtbot.addWidget(window)
-    window._activate("Queue")
-    page = window._pages["Queue"]
-    assert page.table.rowCount() == 2
-    names = {
-        page.table.item(row, 1).text(): row for row in range(page.table.rowCount())
-    }
-    assert set(names) == {"Work", "Media"}
-    assert page.table.item(names["Work"], 2).text() == "Idle"
-    assert page.table.item(names["Work"], 3).text() == "2"
-    assert page.table.item(names["Media"], 3).text() == "5"
-
-
-def test_queue_page_counts_downloads(qtbot, context):
-    download = context.manager.add("https://example.com/report.pdf")
-    queue = context.queues.add("Work")
-    context.queues.add_download(queue.id, download.id, auto_start=False)
-    window = MainWindow(context)
-    qtbot.addWidget(window)
-    window._activate("Queue")
-    page = window._pages["Queue"]
-    assert page.table.rowCount() == 1
-    assert page.table.item(0, 2).text() == "Queued"
-    assert page.table.item(0, 4).text() == "0"
-    assert page.table.item(0, 5).text() == "1"
-    assert page.table.item(0, 6).text() == "1"
-
-
-def test_queue_manager_update_persists(qtbot, context):
-    queue = context.queues.add("Old")
-    updated = context.queues.update(queue.id, name="New", max_concurrent=7)
-    assert updated.name == "New"
-    assert updated.max_concurrent == 7
-    assert context.queues.get(queue.id).name == "New"
-
-
-def test_queue_dialog_defaults(qtbot, context):
-    from magnetoclip.ui.dialogs.queue import QueueDialog
-
-    dialog = QueueDialog()
-    qtbot.addWidget(dialog)
-    assert dialog.name() == ""
-    assert dialog.max_concurrent() == 3
-    dialog.name_edit.setText("  ")
-    dialog._validate_and_accept()
-    assert dialog.result() == 0
 
 
 def test_browser_page_constructs(qtbot, context):
@@ -472,160 +431,6 @@ def test_browser_row_has_auto_install_button(qtbot, context):
     page.refresh()
     assert page._browser_controls["chrome"]["auto"].text() == "Auto-installed"
     assert not page._browser_controls["chrome"]["auto"].isEnabled()
-
-
-def test_scheduler_page_shows_empty_state(qtbot, context):
-    window = MainWindow(context)
-    qtbot.addWidget(window)
-    window._activate("Scheduler")
-    page = window._pages["Scheduler"]
-    assert not page.table.isHidden()
-    assert page.table.rowCount() == 1
-    assert page.table.item(0, 1).text() == (
-        "No schedules yet. Add a schedule to control bandwidth by time of day."
-    )
-    assert page.add_button.isEnabled()
-    assert not page.enable_button.isEnabled()
-    assert not page.enable_check.isChecked()
-
-
-def test_scheduler_page_renders_schedules(qtbot, context):
-    from magnetoclip.database.repositories import ScheduleRepository
-
-    with context.session_factory() as session:
-        repo = ScheduleRepository(session)
-        repo.add(
-            "Night cap",
-            start_time="22:00",
-            end_time="06:00",
-            days_mask=0b1111111,
-            speed_day=2.5,
-            speed_night=1.0,
-            enabled=True,
-        )
-        repo.add(
-            "Weekend boost",
-            start_time=None,
-            end_time=None,
-            days_mask=0b1100000,
-            speed_day=0.0,
-            speed_night=0.0,
-            enabled=False,
-        )
-    window = MainWindow(context)
-    qtbot.addWidget(window)
-    window._activate("Scheduler")
-    page = window._pages["Scheduler"]
-
-    class _FakeScheduler:
-        def is_active(self, schedule):
-            return schedule.name == "Night cap"
-
-    page.scheduler = _FakeScheduler()
-    page._refresh_statuses()
-
-    assert page.table.rowCount() == 2
-    names = {
-        page.table.item(row, 1).text(): row for row in range(page.table.rowCount())
-    }
-    assert set(names) == {"Night cap", "Weekend boost"}
-    row = names["Night cap"]
-    assert page.table.item(row, 2).text() == "22:00 - 06:00"
-    assert page.table.item(row, 3).text() == "Every day"
-    assert page.table.item(row, 4).text() == "2.5 MB/s"
-    assert page.table.item(row, 5).text() == "1 MB/s"
-    assert page.table.item(row, 6).text() == "Active"
-    row = names["Weekend boost"]
-    assert page.table.item(row, 2).text() == "All day"
-    assert page.table.item(row, 3).text() == "Weekends"
-    assert page.table.item(row, 4).text() == "Unlimited"
-    assert page.table.item(row, 6).text() == "Off"
-
-
-def test_scheduler_status_column_reports_idle(qtbot, context):
-    from magnetoclip.database.repositories import ScheduleRepository
-
-    with context.session_factory() as session:
-        ScheduleRepository(session).add(
-            "Weekday morning",
-            start_time="08:00",
-            end_time="10:00",
-            days_mask=0b0011111,
-            enabled=True,
-        )
-    window = MainWindow(context)
-    qtbot.addWidget(window)
-    window._activate("Scheduler")
-    page = window._pages["Scheduler"]
-
-    class _FakeScheduler:
-        def is_active(self, schedule):
-            return False
-
-    page.scheduler = _FakeScheduler()
-    page._refresh_statuses()
-
-    assert page.table.item(0, 3).text() == "Weekdays"
-    assert page.table.item(0, 6).text() == "Idle"
-
-
-def test_scheduler_master_toggle_persists(qtbot, context):
-    window = MainWindow(context)
-    qtbot.addWidget(window)
-    window._activate("Scheduler")
-    page = window._pages["Scheduler"]
-    page.enable_check.setChecked(True)
-    assert context.settings.get("scheduler.enabled") is True
-    page.enable_check.setChecked(False)
-    assert context.settings.get("scheduler.enabled") is False
-
-
-def test_scheduler_dialog_defaults(qtbot, context):
-    from magnetoclip.ui.dialogs.schedule import ScheduleDialog
-
-    dialog = ScheduleDialog()
-    qtbot.addWidget(dialog)
-    assert dialog.name() == ""
-    assert dialog.all_day_check.isChecked()
-    assert dialog.start_time() is None
-    assert dialog.end_time() is None
-    assert dialog.days_mask() == 0b1111111
-    assert dialog.speed_day() is None
-    assert dialog.enabled() is False
-    dialog.name_edit.setText("  ")
-    dialog._validate_and_accept()
-    assert dialog.result() == 0
-    dialog.name_edit.setText("Evening")
-    dialog._validate_and_accept()
-    assert dialog.result() == 1
-
-
-def test_scheduler_dialog_prefills_for_edit(qtbot, context):
-    from magnetoclip.database.repositories import ScheduleRepository
-    from magnetoclip.ui.dialogs.schedule import ScheduleDialog
-
-    with context.session_factory() as session:
-        schedule = ScheduleRepository(session).add(
-            "Night",
-            start_time="22:00",
-            end_time="06:00",
-            days_mask=0b0011111,
-            speed_day=2.0,
-            speed_night=1.0,
-            enabled=True,
-        )
-    dialog = ScheduleDialog(schedule=schedule)
-    qtbot.addWidget(dialog)
-    assert dialog.name() == "Night"
-    assert dialog.all_day_check.isChecked() is False
-    assert dialog.start_time() == "22:00"
-    assert dialog.end_time() == "06:00"
-    assert dialog.days_mask() == 0b0011111
-    assert dialog.speed_day() == 2.0
-    assert dialog.speed_night() == 1.0
-    assert dialog.enabled() is True
-    assert dialog.start_edit.isEnabled()
-    assert dialog.end_edit.isEnabled()
 
 
 def test_about_dialog_has_developer_info(qtbot):

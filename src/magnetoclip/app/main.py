@@ -84,6 +84,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     window = MainWindow(context)
 
+    # Listen for forwarded magnet/.torrent payloads right away so clicks
+    # that arrive while the splash screen is still up are not lost.
+    _start_ipc_server(window)
+
     torrent_file_arg = _find_torrent_arg(argv)
     magnet_uri_arg = _extract_magnet_uri(argv)
 
@@ -101,17 +105,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         import asyncio as _asyncio
         await _asyncio.sleep(4)
 
-        if context.settings.get("scheduler.enabled", False):
-            try:
-                await context.scheduler.start()
-            except Exception:  # noqa: BLE001 - scheduler must not prevent startup
-                log.warning("scheduler_start_failed", exc_info=True)
-
         splash.close_with_fade()
         window.show()
         log.info("main_window_shown")
-
-        _start_ipc_server(window)
 
         if magnet_uri_arg:
             from PySide6.QtCore import QTimer
@@ -270,6 +266,7 @@ def _start_ipc_server(window) -> None:
 
 def _open_torrent_file(window, torrent_path: str) -> None:
     """Open the AddTorrentDialog for a .torrent file or magnet URI."""
+    from magnetoclip.torrent.detect import is_magnet_link
     from magnetoclip.ui.dialogs.add_torrent import AddTorrentDialog
 
     try:
@@ -279,14 +276,21 @@ def _open_torrent_file(window, torrent_path: str) -> None:
         window._activate_nav("torrents")
         dialog = AddTorrentDialog(window.context, parent=window, url=torrent_path)
         if dialog.exec():
-            window.context.manager.add(
-                url=dialog.url(),
-                category_name=dialog.category() or None,
-                queue_id=dialog.queue_id(),
-            )
-            window.context.manager.start(
-                window.context.manager.list_snapshots(limit=1)[-1]["id"]
-            )
+            manager = window.context.manager
+            try:
+                download = manager.add(
+                    url=dialog.url(),
+                    category_name=dialog.category() or None,
+                )
+                if is_magnet_link(download.url) or download.detected_type == "torrent":
+                    manager._pending_torrent_opts[download.id] = {
+                        "sequential": dialog.sequential(),
+                        "seed_mode": dialog.seed_mode(),
+                    }
+            except Exception as exc:
+                log.warning("torrent_file_open_failed", error=str(exc))
+                return
+            manager.torrent_queue.admit_and_advance()
     except Exception as exc:
         log.warning("torrent_file_open_failed", error=str(exc))
 

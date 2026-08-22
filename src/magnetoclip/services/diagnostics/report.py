@@ -9,6 +9,8 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+from ...version import __version__
+
 SENSITIVE_KEYS = {
     "auth_ref",
     "auth_password",
@@ -41,7 +43,7 @@ class DiagnosticReport:
             "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "application": {
                 "name": "MagnetoClip",
-                "version": "0.1.2",
+                "version": __version__,
                 "python": sys.version.split()[0],
                 "platform": platform.platform(),
             },
@@ -52,9 +54,7 @@ class DiagnosticReport:
             },
             "settings": self._scrub_settings(self.context.settings.as_dict()),
             "downloads": self._download_summary(),
-            "queues": self._queues_summary(),
             "categories": self._categories_summary(),
-            "schedules": self._schedules_summary(),
         }
 
     def _download_summary(self) -> list[dict]:
@@ -77,37 +77,12 @@ class DiagnosticReport:
             for s in snapshots
         ]
 
-    def _queues_summary(self) -> list[dict]:
-        queues = getattr(self.context, "queues", None)
-        if queues is None:
-            return []
-        return [
-            {"id": q.id, "name": q.name, "max_concurrent": q.max_concurrent}
-            for q in queues.list()
-        ]
-
     def _categories_summary(self) -> list[dict]:
         categories = getattr(self.context, "categories", None)
         if categories is None:
             return []
         return [
             {"id": c.id, "name": c.name, "folder": c.folder} for c in categories.list()
-        ]
-
-    def _schedules_summary(self) -> list[dict]:
-        scheduler = getattr(self.context, "scheduler", None)
-        if scheduler is None:
-            return []
-        return [
-            {
-                "id": s.id,
-                "name": s.name,
-                "start_time": s.start_time,
-                "end_time": s.end_time,
-                "days_mask": s.days_mask,
-                "enabled": s.enabled,
-            }
-            for s in scheduler.schedules()
         ]
 
     # ----- scrubbing -----

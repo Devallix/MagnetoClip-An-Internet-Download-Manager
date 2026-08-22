@@ -1,1 +1,1 @@
-"""Core domain logic: downloads, queues, scheduler, categories, events."""
+"""Core domain logic: downloads, torrent queue, categories, events."""

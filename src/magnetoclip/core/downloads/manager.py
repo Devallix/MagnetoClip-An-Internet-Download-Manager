@@ -5,8 +5,8 @@ Responsibilities:
 - start/pause/resume/cancel/restart/remove downloads with concurrency limits
 - resume interrupted downloads from ``.mclip`` sidecars
 - mirror engine progress/state events into the SQLite database
-- apply global bandwidth from settings and the scheduler
-- advance queue items when capacity frees up
+- apply global bandwidth from settings
+- advance the global torrent queue when capacity frees up
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from sqlalchemy.orm import sessionmaker
 
 from ...app.context import AppContext
 from ...database.models import Download, DownloadStatus
-from ...database.repositories import DownloadRepository, QueueRepository
+from ...database.repositories import DownloadRepository
 from ...engine.downloader.engine import MagnetoCore, spec_from_url
 from ...engine.resume.mclip import MClipState
 from ...intelligence import SpeedPredictor
@@ -51,6 +51,7 @@ from ...torrent.resume import (
 )
 from ...torrent.types import TorrentSpec
 from ..events.bus import Events
+from ..torrent_queue import TorrentQueue
 
 log = get_logger(__name__)
 
@@ -80,7 +81,6 @@ class DownloadManager:
         *,
         core: MagnetoCore | None = None,
         categories=None,
-        queues=None,
     ) -> None:
         self.context = context
         self.settings = context.settings
@@ -92,7 +92,7 @@ class DownloadManager:
         )
         self.core = core or MagnetoCore(bus=context.events, client_config=client_config)
         self.categories = categories or context.categories
-        self.queues = queues or context.queues
+        self.torrent_queue = TorrentQueue(self)
 
         self.semaphore = asyncio.Semaphore(
             int(self.settings.get("downloads.simultaneous", 3))
@@ -148,7 +148,6 @@ class DownloadManager:
         filename: str | None = None,
         save_dir: Path | str | None = None,
         category_name: str | None = None,
-        queue_id: int | None = None,
         priority: int = 0,
         connections_max: int | None = None,
         headers: dict[str, str] | None = None,
@@ -206,7 +205,6 @@ class DownloadManager:
                 filename=final_path.name,
                 save_path=str(final_path),
                 category_id=category.id if category else None,
-                queue_id=queue_id,
                 priority=priority,
                 connections_max=connections,
                 headers=self._merge_cookie_header(headers, cookies),
@@ -245,15 +243,48 @@ class DownloadManager:
             download = DownloadRepository(session).get(download_id)
         if download is None:
             return False
+
+        if is_torrent_url(download.url) or download.detected_type == "torrent":
+            handler = self._torrent_handlers.get(download_id)
+            if handler is not None and download.status in (
+                DownloadStatus.paused,
+                DownloadStatus.queued,
+                DownloadStatus.scheduled,
+            ):
+                # Parked by pause(): the polling task is still alive, so a
+                # plain restart would duplicate it. Resume in place instead.
+                try:
+                    handler.resume()
+                except Exception as exc:
+                    log.warning(
+                        "torrent_resume_handler_error",
+                        download_id=download_id,
+                        error=str(exc),
+                    )
+                self._update_db_status(download_id, DownloadStatus.downloading)
+                return True
+            if (
+                download.status in ACTIVE_STATUSES
+                or download_id in self._tasks
+                or download.status == DownloadStatus.completed
+            ):
+                return False
+            if not queue_advance:
+                # Manual starts respect the global torrent queue: torrents
+                # waiting for admission (scheduled) or for a free transfer
+                # slot stay queued until the queue advances them.
+                if download.status == DownloadStatus.scheduled:
+                    return False
+                if self.torrent_queue.slots_full():
+                    return False
+            return self._start_torrent(download_id)
+
         if (
             download.status in ACTIVE_STATUSES
             or download_id in self._tasks
             or download.status == DownloadStatus.completed
         ):
             return False
-
-        if is_torrent_url(download.url) or download.detected_type == "torrent":
-            return self._start_torrent(download_id)
 
         if is_streaming_url(download.url):
             return self._start_streaming(download_id)
@@ -291,7 +322,7 @@ class DownloadManager:
             snapshot = self.snapshot_item(download)
         self.core.set_priority(download_id, priority)
         self.events.post(Events.DOWNLOAD_UPDATED, snapshot)
-        self._advance_queues_for(download_id)
+        self.torrent_queue.admit_and_advance()
 
     def pause(self, download_id: int) -> None:
         if download_id in self._stream_cancel:
@@ -306,6 +337,9 @@ class DownloadManager:
                 except Exception as exc:
                     log.warning("torrent_pause_handler_error", download_id=download_id, error=str(exc))
             self._update_db_status(download_id, DownloadStatus.paused)
+            # A paused torrent frees its transfer slot; let waiting
+            # queued torrents use it right away.
+            self.torrent_queue.advance()
             return
         self.core.pause(download_id)
         self._update_db_status(download_id, DownloadStatus.paused)
@@ -314,14 +348,12 @@ class DownloadManager:
         if download_id in self._stream_cancel:
             self._schedule_stream_restart(download_id)
             return
-        if download_id in self._torrent_handlers:
-            handler = self._torrent_handlers.get(download_id)
-            if handler is not None:
-                try:
-                    handler.resume()
-                except Exception as exc:
-                    log.warning("torrent_resume_handler_error", download_id=download_id, error=str(exc))
-            self._update_db_status(download_id, DownloadStatus.downloading)
+        with self.session_factory() as session:
+            download = DownloadRepository(session).get(download_id)
+        if download is not None and (
+            is_torrent_url(download.url) or download.detected_type == "torrent"
+        ):
+            self.torrent_queue.resume(download_id)
             return
         task = self.core.get(download_id)
         if task is not None:
@@ -341,7 +373,8 @@ class DownloadManager:
                 download.status = DownloadStatus.downloading
                 download.torrent_seeding = True
                 session.commit()
-            self.start(download_id)
+            # Seeding is not a queue-managed transfer; bypass slot limits.
+            self.start(download_id, queue_advance=True)
         except Exception as exc:
             log.warning("torrent_start_seeding_error", download_id=download_id, error=str(exc))
 
@@ -429,7 +462,7 @@ class DownloadManager:
                     log.warning("file_delete_failed", error=str(exc))
             repo.remove(download)
         self.events.post(Events.DOWNLOAD_REMOVED, {"id": download_id})
-        self._advance_queues_for(download_id)
+        self.torrent_queue.admit_and_advance()
 
     def start_all(self) -> None:
         with self.session_factory() as session:
@@ -437,20 +470,6 @@ class DownloadManager:
         for download in downloads:
             if download.status in (DownloadStatus.queued, DownloadStatus.scheduled):
                 self.start(download.id)
-
-    def count_active_in_queue(self, queue_id: int) -> int:
-        with self.session_factory() as session:
-            repo = QueueRepository(session)
-            items = repo.items(queue_id)
-        return sum(1 for item in items if self._is_active(item.download_id))
-
-    def _is_active(self, download_id: int) -> bool:
-        task = self.core.get(download_id)
-        if task is not None:
-            return not task.is_terminal()
-        with self.session_factory() as session:
-            download = DownloadRepository(session).get(download_id)
-        return bool(download and download.status in ACTIVE_STATUSES)
 
     # ----- execution -----
 
@@ -640,7 +659,7 @@ class DownloadManager:
             snapshot = self.snapshot_item(download)
         self.events.post(Events.DOWNLOAD_UPDATED, snapshot)
         self._post_notification("failed", snapshot)
-        self._advance_queues_for(download_id)
+        self.torrent_queue.admit_and_advance()
 
     def _finalize_stream(self, download_id: int, result: str, final_path: Path) -> None:
         try:
@@ -663,7 +682,7 @@ class DownloadManager:
             snapshot = self.snapshot_item(download) if download else {"id": download_id}
         self.events.post(Events.DOWNLOAD_UPDATED, snapshot)
         self._post_notification("completed", snapshot)
-        self._advance_queues_for(download_id)
+        self.torrent_queue.admit_and_advance()
         self._inspect_media_async(download_id)
 
     # ----- torrent execution -----
@@ -824,7 +843,7 @@ class DownloadManager:
             snapshot = self.snapshot_item(download)
         self.events.post(Events.DOWNLOAD_UPDATED, snapshot)
         self._post_notification("failed", snapshot)
-        self._advance_queues_for(download_id)
+        self.torrent_queue.admit_and_advance()
 
     def _finalize_torrent(
         self, download_id: int, result: str, handler: TorrentDownloadHandler
@@ -852,7 +871,7 @@ class DownloadManager:
             self._post_notification("completed", snapshot)
         elif result == "failed":
             self._post_notification("failed", snapshot)
-        self._advance_queues_for(download_id)
+        self.torrent_queue.admit_and_advance()
 
     def _db_status_is(self, download_id: int, status: DownloadStatus) -> bool:
         with self.session_factory() as session:
@@ -887,7 +906,7 @@ class DownloadManager:
             download = repo.get(download_id)
             snapshot = self.snapshot_item(download) if download else {"id": download_id}
         self.events.post(Events.DOWNLOAD_UPDATED, snapshot)
-        self._advance_queues_for(download_id)
+        self.torrent_queue.admit_and_advance()
         self._post_notification(result, snapshot)
 
     def _post_notification(self, result: str | None, snapshot: dict) -> None:
@@ -1045,6 +1064,7 @@ class DownloadManager:
         if self.semaphore._value != simultaneous:
             self.semaphore = asyncio.Semaphore(simultaneous)
         self._apply_bandwidth()
+        self.torrent_queue.admit_and_advance()
 
     # ----- helpers -----
 
@@ -1177,12 +1197,6 @@ class DownloadManager:
                 part.unlink(missing_ok=True)
         except OSError:
             pass
-
-    def _advance_queues_for(self, download_id: int) -> None:
-        with self.session_factory() as session:
-            queue_ids = QueueRepository(session).queue_ids_for_download(download_id)
-        for queue_id in queue_ids:
-            self.queues.advance(queue_id)
 
     @staticmethod
     def _validate_url(url: str) -> None:

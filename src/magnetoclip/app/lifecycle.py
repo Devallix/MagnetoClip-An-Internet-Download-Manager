@@ -9,8 +9,6 @@ from magnetoclip.core.categories.manager import CategoryManager
 from magnetoclip.core.downloads.manager import DownloadManager
 from magnetoclip.core.events.bus import EventBus
 from magnetoclip.core.proxies.manager import ProxyManager
-from magnetoclip.core.queues.manager import QueueManager
-from magnetoclip.core.scheduler.scheduler import Scheduler
 from magnetoclip.database.repositories import SettingsStore
 from magnetoclip.database.session import Database
 from magnetoclip.services.filesystem.paths import (
@@ -58,17 +56,12 @@ def build_context(
     )
 
     categories = CategoryManager(context)
-    queues = QueueManager(context)
     proxies = ProxyManager(context)
     context.categories = categories
-    context.queues = queues
     context.proxies = proxies
 
     manager = DownloadManager(context)
     context.manager = manager
-    queues.attach(manager)
-
-    context.scheduler = Scheduler(context)
 
     from magnetoclip.services.analytics import AnalyticsService
     from magnetoclip.services.notification.notifier import Notifier

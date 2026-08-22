@@ -119,6 +119,25 @@ def _migration_008_torrent_search_history(engine: Engine) -> None:
     TorrentSearchHistory.__table__.create(engine, checkfirst=True)
 
 
+def _migration_009_drop_queue_tables(engine: Engine) -> None:
+    """Drop named queues/schedules (replaced by the global torrent queue)."""
+    names = set(inspect(engine).get_table_names())
+    with engine.begin() as conn:
+        for table in ("queue_items", "queues", "schedules"):
+            if table in names:
+                conn.execute(text(f"DROP TABLE {table}"))
+    columns = {column["name"] for column in inspect(engine).get_columns("downloads")}
+    if "queue_id" not in columns:
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE downloads DROP COLUMN queue_id"))
+    except Exception:  # noqa: BLE001 - older SQLite cannot drop columns
+        # The column is no longer mapped by the model, so leaving it in
+        # place is harmless.
+        pass
+
+
 MIGRATIONS: list[Migration] = [
     _migration_001_create_all,
     _migration_002_media_columns,
@@ -128,6 +147,7 @@ MIGRATIONS: list[Migration] = [
     _migration_006_browser_requests,
     _migration_007_torrent_columns,
     _migration_008_torrent_search_history,
+    _migration_009_drop_queue_tables,
 ]
 
 

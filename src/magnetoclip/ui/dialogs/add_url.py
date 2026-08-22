@@ -82,13 +82,6 @@ class AddUrlDialog(QDialog):
             self.category_combo.addItem("Other")
         layout.addWidget(self.category_combo)
 
-        layout.addWidget(QLabel("Queue"))
-        self.queue_combo = QComboBox()
-        self.queue_combo.addItem("None", None)
-        for queue in getattr(getattr(context, "queues", None), "list", list)():
-            self.queue_combo.addItem(queue.name, queue.id)
-        layout.addWidget(self.queue_combo)
-
         connections_row = QHBoxLayout()
         connections_row.addWidget(QLabel("Connections"))
         self.connections_spin = QSpinBox()
@@ -218,9 +211,6 @@ class AddUrlDialog(QDialog):
 
     def category(self) -> str | None:
         return self.category_combo.currentText()
-
-    def queue_id(self) -> int | None:
-        return self.queue_combo.currentData()
 
     def connections(self) -> int | None:
         return self.connections_spin.value()

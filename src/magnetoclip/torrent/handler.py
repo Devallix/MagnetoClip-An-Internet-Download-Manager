@@ -309,6 +309,10 @@ class TorrentDownloadHandler:
             log.warning("torrent_resume_failed", download_id=self.spec.download_id, error=str(exc))
         self._pause_event.clear()
 
+    def is_paused(self) -> bool:
+        """True while the handler is parked by pause()."""
+        return self._pause_event.is_set()
+
     def is_done(self) -> bool:
         return self._done_event.is_set()
 

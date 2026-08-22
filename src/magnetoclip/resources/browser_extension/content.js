@@ -94,6 +94,7 @@
     "twimg.com",            // X / Twitter (video.twimg.com)
     "cdn.telegram.org",     // Telegram
     "telegram.org",
+    "telesco.pe",           // Telegram file CDN (cdn1.telesco.pe, ...)
     "cdninstagram.com",     // Instagram
     "pinimg.com",           // Pinterest
     "cdn.discordapp.com",   // Discord
@@ -286,10 +287,15 @@
         MEDIA_EXTS.has(ext)
       );
     }
-    // Telegram serves every uploaded file under /file/ (photos, videos, docs);
-    // many are extensionless, so a /file/ path is treated as a real file.
-    if (host.endsWith("cdn.telegram.org")) {
+    // Telegram serves every uploaded file under /file/ (photos, videos, docs)
+    // on its CDNs; web.telegram.org itself proxies parts under /api/files/.
+    // Many are extensionless, so a /file/ or /api/files/ path is treated as a
+    // real file.
+    if (host.endsWith("cdn.telegram.org") || host.endsWith("telesco.pe")) {
       return path.includes("/file/");
+    }
+    if (host.endsWith("telegram.org")) {
+      return path.includes("/file/") || path.includes("/api/files/");
     }
     return MEDIA_EXTS.has(ext);
   }
@@ -400,6 +406,75 @@
     return type === "image" || type === "video" || type === "audio" ? type : "file";
   }
 
+  // Telegram Web builds media blobs from decrypted bytes and often creates them
+  // without a MIME type, so fetch(blob:) reports an empty Content-Type and the
+  // blob used to be discarded as a generic file. Magic-byte sniffing recovers
+  // the real kind; it also covers generic octet-stream labels.
+  function sniffMediaType(bytes) {
+    if (!bytes || bytes.length < 12) {
+      return "";
+    }
+    const b = bytes;
+    const ascii = (start, text) => {
+      for (let i = 0; i < text.length; i++) {
+        if (b[start + i] !== text.charCodeAt(i)) {
+          return false;
+        }
+      }
+      return true;
+    };
+    if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) {
+      return "image/jpeg";
+    }
+    if (
+      b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 &&
+      b[4] === 0x0d && b[5] === 0x0a && b[6] === 0x1a && b[7] === 0x0a
+    ) {
+      return "image/png";
+    }
+    if (ascii(0, "GIF87a") || ascii(0, "GIF89a")) {
+      return "image/gif";
+    }
+    if (ascii(0, "RIFF") && ascii(8, "WEBP")) {
+      return "image/webp";
+    }
+    if (b[0] === 0x42 && b[1] === 0x4d) {
+      return "image/bmp";
+    }
+    if (b[0] === 0x00 && b[1] === 0x00 && ascii(4, "ftyp")) {
+      const brand = String.fromCharCode(b[8], b[9], b[10], b[11]).toLowerCase();
+      if (/^(avi|f4v|mif|hei|heic|msf)/.test(brand)) {
+        return "image/heic";
+      }
+      return "video/mp4";
+    }
+    if (b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3) {
+      return "video/webm";
+    }
+    if (ascii(0, "OggS")) {
+      return "audio/ogg";
+    }
+    if (ascii(0, "ID3") || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0)) {
+      return "audio/mpeg";
+    }
+    if (ascii(0, "RIFF") && ascii(8, "WAVE")) {
+      return "audio/wav";
+    }
+    if (ascii(0, "fLaC")) {
+      return "audio/flac";
+    }
+    return "";
+  }
+
+  function mimeIsSpecific(mime) {
+    const value = String(mime || "");
+    const type = value.split("/")[0].toLowerCase();
+    if (type !== "image" && type !== "video" && type !== "audio") {
+      return false;
+    }
+    return !/octet-stream|generic/i.test(value);
+  }
+
   // ---- blob media capture ----
 
   // Blob URLs handed to MagnetoClip are useless on their own (the app cannot
@@ -480,13 +555,24 @@
       if (!response.ok) {
         return;
       }
-      const mimeType = response.headers.get("Content-Type") || "";
-      const detectedType = typeForMime(mimeType);
-      if (detectedType === "file") {
-        return;
-      }
       const buffer = await response.arrayBuffer();
       const bytes = new Uint8Array(buffer);
+      let mimeType = response.headers.get("Content-Type") || "";
+      let detectedType = typeForMime(mimeType);
+      if (!mimeIsSpecific(mimeType)) {
+        mimeType = sniffMediaType(bytes) || mimeType;
+        detectedType = typeForMime(mimeType);
+      }
+      if (detectedType === "file") {
+        // Bytes we cannot classify still count as the kind of element that
+        // displayed them (Telegram ships untyped blobs straight into <img> /
+        // <video>). Blobs with no element context stay skipped so ordinary
+        // page chrome does not trigger capture popups.
+        detectedType = String((meta && meta.expected_type) || "");
+        if (!detectedType || detectedType === "file") {
+          return;
+        }
+      }
       if (!bytes.length || bytes.length > MAX_BLOB_CAPTURE_BYTES) {
         return;
       }
@@ -696,6 +782,7 @@
         if (src.startsWith("blob:")) {
           blobDetected.value = true;
           captureBlobUrl(src, {
+            expected_type: fallbackType,
             width: element.videoWidth || 0,
             height: element.videoHeight || 0,
           });
@@ -734,6 +821,7 @@
         image.getAttribute("data-src") || "";
       if (src.startsWith("blob:")) {
         captureBlobUrl(src, {
+          expected_type: "image",
           width: image.naturalWidth || parseInt(image.getAttribute("width"), 10) || 0,
           height: image.naturalHeight || parseInt(image.getAttribute("height"), 10) || 0,
         });
@@ -747,6 +835,25 @@
         continue;
       }
       addDirect(direct, src, "image");
+    }
+  }
+
+  // Telegram Web K renders many photos as CSS background-image blob URLs on
+  // plain divs instead of <img> elements; those never reach scanImages. Inline
+  // style attributes serialize whatever CSSOM set, so a selector over them
+  // finds these viewers cheaply.
+  function scanBackgroundBlobs() {
+    for (const element of document.querySelectorAll('[style*="blob:"]')) {
+      const style = element.getAttribute("style") || "";
+      const match = /url\((['"]?)(blob:[^)'"]+)\1\)/i.exec(style);
+      if (!match) {
+        continue;
+      }
+      captureBlobUrl(match[2], {
+        expected_type: "image",
+        width: element.clientWidth || 0,
+        height: element.clientHeight || 0,
+      });
     }
   }
 
@@ -994,6 +1101,7 @@
     scanAnchors(direct, manifests);
     scanMediaElements(direct, manifests, blobDetected);
     scanImages(direct);
+    scanBackgroundBlobs();
     scanDownloadAnchors(direct);
     scanPerformanceResources(direct, manifests);
 

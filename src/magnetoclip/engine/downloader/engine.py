@@ -65,6 +65,10 @@ async def analyze(
     """Probe a remote resource for size, range support, and metadata."""
     request_headers = {**(headers or {}), "Range": "bytes=0-0"}
     timeout_value = httpx.Timeout(timeout)
+    # Headers only — never iterate the body. Breaking out of aiter_bytes()
+    # leaves a suspended async generator behind whose GC finalization runs
+    # in a foreign task and trips anyio/httpcore ("async generator ignored
+    # GeneratorExit" / "cancel scope in a different task").
     async with client.stream(
         "GET", url, headers=request_headers, timeout=timeout_value
     ) as response:
@@ -75,8 +79,6 @@ async def analyze(
                 request=response.request,
                 response=response,
             )
-        async for _ in response.aiter_bytes():
-            break  # drain a minimal amount, then close
 
         content_range = response.headers.get("Content-Range")
         total_size: int | None = None
