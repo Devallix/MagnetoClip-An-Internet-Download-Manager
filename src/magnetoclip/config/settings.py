@@ -41,7 +41,10 @@ DEFAULTS: dict[str, Any] = {
     "network.max_bandwidth_mbps": 0.0,
     "network.default_proxy_id": 0,
     # Browser
-    "browser.integration_enabled": False,
+    # Integration defaults ON: the extension is only ever loaded by an explicit
+    # user action, so shipping it dead-by-default just produces a silent,
+    # broken-looking bridge (captures rejected with "integration disabled").
+    "browser.integration_enabled": True,
     "browser.capture_enabled": True,
     "browser.default_downloader": False,
     "browser.confirm_capture": True,

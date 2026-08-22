@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
     QHeaderView,
+    QMenu,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -90,7 +91,10 @@ class DetectedPage(Page):
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setFocusPolicy(Qt.NoFocus)
         self.table.cellClicked.connect(self._on_cell_clicked)
+        self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         self.table.itemChanged.connect(self._on_item_changed)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setMinimumSectionSize(60)
@@ -170,6 +174,8 @@ class DetectedPage(Page):
     def _download_selected(self) -> None:
         manager = self.context.manager
         rows = self._selected_indexes()
+        failures: list[str] = []
+        added = 0
         for row in rows:
             entry = self._files[row]
             try:
@@ -179,13 +185,30 @@ class DetectedPage(Page):
                     headers={"Referer": entry["page_url"]}
                     if entry.get("page_url")
                     else None,
+                    cookies=entry.get("cookies") or None,
                     data=self._decode_data(entry.get("data_base64")),
                 )
-            except Exception:  # noqa: BLE001 - a bad entry must not block the rest
+            except Exception as exc:  # noqa: BLE001 - report bad entries, keep going
+                failures.append(f"{entry['url']}: {exc}")
                 continue
             self._start(download.id)
             self._remove_entry(entry)
-        self.refresh()
+            added += 1
+        if failures:
+            first = failures[0]
+            if len(first) > 160:
+                first = first[:157] + "..."
+            suffix = f" (and {len(failures) - 1} more)" if len(failures) > 1 else ""
+            self.context.events.post(
+                Events.NOTIFICATION_REQUESTED,
+                {
+                    "kind": "error",
+                    "title": "Could not add some downloads",
+                    "body": first + suffix,
+                },
+            )
+        if added or failures:
+            self.refresh()
 
     @staticmethod
     def _decode_data(data_base64: str | None) -> bytes | None:
@@ -241,6 +264,40 @@ class DetectedPage(Page):
             item.setCheckState(Qt.Checked)
         self.table.selectRow(row)
 
+    def _on_cell_double_clicked(self, row: int, _column: int) -> None:
+        if row < 0 or row >= len(self._files):
+            return
+        item = self.table.item(row, 0)
+        if item is None:
+            return
+        self.table.blockSignals(True)
+        try:
+            item.setCheckState(Qt.Checked)
+        finally:
+            self.table.blockSignals(False)
+        self._download_selected()
+
+    def _show_context_menu(self, pos) -> None:
+        row = self.table.rowAt(pos.y())
+        if row >= 0:
+            self._on_cell_clicked(row, 1)
+        menu = QMenu(self)
+        download_action = menu.addAction("Download")
+        copy_action = menu.addAction("Copy URL")
+        menu.addSeparator()
+        remove_action = menu.addAction("Remove Selected")
+        chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if chosen is download_action:
+            self._download_selected()
+        elif chosen is copy_action:
+            urls = [self._files[r]["url"] for r in self._selected_indexes()]
+            if urls:
+                from PySide6.QtWidgets import QApplication
+
+                QApplication.clipboard().setText("\n".join(urls))
+        elif chosen is remove_action:
+            self._remove_selected()
+
     def _clear_empty_row(self) -> None:
         if self._empty_row is None:
             return
@@ -275,6 +332,11 @@ class DetectedPage(Page):
                     continue
                 if url in seen:
                     continue
+                # Blob/data URIs without inline bytes can never be downloaded
+                # from here (only the page that created them can resolve them);
+                # showing them just produces silent failures.
+                if url.startswith(("blob:", "data:")) and not file.get("data_base64"):
+                    continue
                 seen.add(url)
                 entries.append(
                     {
@@ -284,6 +346,8 @@ class DetectedPage(Page):
                         "detected_type": file.get("detected_type") or "other",
                         "page_url": detection.page_url,
                         "created_at": detection.created_at,
+                        "cookies": file.get("cookies") or None,
+                        "data_base64": file.get("data_base64"),
                     }
                 )
 

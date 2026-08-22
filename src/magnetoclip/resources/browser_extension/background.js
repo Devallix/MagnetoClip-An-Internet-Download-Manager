@@ -134,6 +134,18 @@ function ensurePort() {
     });
     nativePort.onDisconnect.addListener(() => {
       nativePort = null;
+      // Fail everything still waiting so the popup reports a clear error
+      // right away instead of hanging until its own watchdog fires.
+      const waiting = Array.from(pendingResponses.values());
+      pendingResponses.clear();
+      for (const entry of waiting) {
+        entry.reject(new Error("MagnetoClip is not reachable. Is the app running?"));
+      }
+      for (const [requestId, watchdog] of interceptTimers) {
+        clearTimeout(watchdog);
+        interceptTimers.delete(requestId);
+      }
+      interceptRequests.clear();
     });
     nativePort.postMessage({ type: "settings" });
   } catch (error) {
@@ -154,8 +166,28 @@ function request(type, payload, onRequestId) {
       onRequestId(id);
     }
     pendingResponses.set(id, { resolve, reject });
-    port.postMessage({ id, type, ...payload });
+    try {
+      port.postMessage({ id, type, ...payload });
+    } catch (error) {
+      pendingResponses.delete(id);
+      reject(new Error("MagnetoClip is not reachable. Is the app running?"));
+    }
   });
+}
+
+// Captures can be refused by the app itself (integration disabled, capture
+// disabled). Those rejections used to vanish into .catch(() => {}), which made
+// every button feel dead. Surface them as a notification, rate-limited so a
+// page firing twenty captures does not fire twenty toasts.
+let lastRefusalNotice = 0;
+
+function notifyCaptureRefusal(message) {
+  const now = Date.now();
+  if (now - lastRefusalNotice < 60000) {
+    return;
+  }
+  lastRefusalNotice = now;
+  notify("MagnetoClip", message);
 }
 
 // Fulfil an app request to fetch a ``blob:`` URL (pasted into the new-download
@@ -339,6 +371,31 @@ function getCookiesFor(url) {
   });
 }
 
+// Detection rows are downloaded later, from MagnetoClip's Detected page —
+// possibly after the tab is closed. Session-gated URLs (Telegram Web serves
+// media only with the page's cookies) need them stored alongside the entry.
+function getCookieDictFor(url) {
+  return new Promise((resolve) => {
+    if (!chrome.cookies || !/^https?:/i.test(url)) {
+      resolve(null);
+      return;
+    }
+    chrome.cookies.getAll({ url: url }, (cookies) => {
+      if (chrome.runtime.lastError || !cookies || !cookies.length) {
+        resolve(null);
+        return;
+      }
+      const dict = {};
+      for (const cookie of cookies) {
+        if (cookie.name && cookie.value !== undefined && cookie.value !== null) {
+          dict[cookie.name] = cookie.value;
+        }
+      }
+      resolve(Object.keys(dict).length ? dict : null);
+    });
+  });
+}
+
 function withCookies(payload) {
   return getCookiesFor(payload.url).then((cookies) => {
     if (cookies) {
@@ -456,7 +513,9 @@ function sendCapture(item, filename) {
         interceptTimers.set(requestId, watchdog);
       })
     )
-    .catch(() => {});
+    .catch((error) => {
+      notifyCaptureRefusal(error.message);
+    });
 }
 
 // Intercept a browser download: offer the file to MagnetoClip and cancel the
@@ -532,7 +591,6 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   pendingIntercepts.delete(item.id);
   sendCapture(item, filename);
 });
-
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message && message.type === "ping") {
     sendResponse({ type: "pong" });
@@ -621,6 +679,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             (response.filename || message.url) + " is waiting for your confirmation in MagnetoClip."
           );
           sendResponse({ type: "capture_pending" });
+        } else if (response.type === "capture_skipped") {
+          notify(
+            "MagnetoClip — downloads paused",
+            "'Skip all' is active, so this file was not queued. Re-enable it in MagnetoClip's settings."
+          );
+          sendResponse({
+            type: "capture_skipped",
+            message: response.message || "'Skip all' is active in MagnetoClip.",
+          });
         } else if (response.type === "capture_error") {
           sendResponse({
             type: "capture_error",
@@ -636,7 +703,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message && message.type === "page_scan") {
-    request("page_scan", { url: message.url, files: message.files }).catch(() => {});
+    request("page_scan", { url: message.url, files: message.files }).catch((error) => {
+      notifyCaptureRefusal(error.message);
+    });
     return;
   }
   if (message && message.type === "capture_chunk") {
@@ -696,7 +765,38 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         detected_type: file.detected_type || "file",
         mime_type: file.mime_type || "",
         data_base64: hasData ? file.data_base64 : undefined,
-      }).catch(() => {});
+      })
+        .then((response) => {
+          if (response && response.type === "capture_skipped") {
+            notifyCaptureRefusal(
+              "'Skip all' is active in MagnetoClip — detected files are not being queued."
+            );
+          }
+        })
+        .catch((error) => {
+          notifyCaptureRefusal(error.message);
+        });
+    }
+    // Social and yt-dlp pages never send a plain page_scan, so the app would
+    // never learn about the page itself — no detection row, no tray
+    // notification. Record one here so detection behaves uniformly.
+    const scanFiles = files
+      .filter((file) => file && file.url)
+      .filter((file) => !/^(blob|data):/i.test(file.url))
+      .map((file) => ({
+        url: file.url,
+        filename: file.filename || "",
+        detected_type: file.detected_type || "file",
+      }));
+    if (scanFiles.length && message.url && /^https?:/i.test(message.url)) {
+      getCookieDictFor(message.url).then((cookies) => {
+        if (cookies) {
+          for (const file of scanFiles) {
+            file.cookies = cookies;
+          }
+        }
+        request("page_scan", { url: message.url, files: scanFiles }).catch(() => {});
+      });
     }
     return;
   }
@@ -773,7 +873,9 @@ if (chrome.webRequest) {
         referrer: details.initiator || details.originUrl || "",
         source: "page_scan",
         detected_type: detectedType,
-      }).catch(() => {});
+      }).catch((error) => {
+        notifyCaptureRefusal(error.message);
+      });
     },
     { urls: ["http://*/*", "https://*/*"] }
   );

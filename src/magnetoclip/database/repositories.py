@@ -282,14 +282,37 @@ class BrowserDetectionRepository:
         *,
         count: int,
         files: list[dict[str, Any]] | None = None,
+        notified: bool = False,
     ) -> BrowserDetection:
         detection = BrowserDetection(
-            page_url=page_url, count=count, files_json=files or []
+            page_url=page_url,
+            count=count,
+            files_json=files or [],
+            notified=notified,
         )
         self.session.add(detection)
         self.session.commit()
         self.session.refresh(detection)
         return detection
+
+    def known_file_urls(self, limit: int = 2000) -> set[str]:
+        """URLs recorded by earlier detections.
+
+        Used to suppress repeat tray notifications when a rescan of the same
+        page finds nothing new.
+        """
+        rows = self.session.scalars(
+            select(BrowserDetection.files_json)
+            .order_by(BrowserDetection.created_at.desc())
+            .limit(limit)
+        ).all()
+        urls: set[str] = set()
+        for files in rows:
+            for file in files or []:
+                url = str((file or {}).get("url") or "").strip()
+                if url:
+                    urls.add(url)
+        return urls
 
     def unnotified(self, limit: int = 50) -> list[BrowserDetection]:
         return list(

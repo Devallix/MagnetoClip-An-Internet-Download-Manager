@@ -88,6 +88,13 @@ class BrowserManager:
             }
         url = str(message.get("url") or "").strip()
         data_base64 = message.get("data_base64")
+        log.info(
+            "capture_received",
+            url=url,
+            source=message.get("source") or "",
+            detected_type=message.get("detected_type") or "",
+            has_data=bool(data_base64),
+        )
         if data_base64:
             # In-memory media (Telegram blob: images): no HTTP URL to validate
             # or probe — the bytes already travelled to us.
@@ -118,26 +125,34 @@ class BrowserManager:
         if not explicit and (
             auto_detected or self.context.settings.get("browser.confirm_capture", True)
         ):
-            capture = self._enqueue_pending_capture(message, url, data_base64)
-            self.context.events.post(
-                Events.BROWSER_EVENT,
-                {
-                    "url": url,
-                    "source": message.get("source"),
-                    "pending_capture_id": capture.id,
-                    "filename": capture.filename,
-                },
-            )
-            return {
-                "type": "capture_pending",
-                "id": capture.id,
-                "url": url,
-                "filename": capture.filename or "",
-            }
+            return self._queue_pending(message, url, data_base64)
 
         if self.manager is None:
-            return {"type": "capture_error", "message": "download manager unavailable"}
+            # The browser-host process has no download manager of its own, so
+            # an explicit user action (popup/context-menu download) is queued
+            # for the main app's watcher instead of failing outright.
+            return self._queue_pending(message, url, data_base64)
         return self._start_immediately(message, url, filename, data_base64)
+
+    def _queue_pending(
+        self, message: dict[str, Any], url: str, data_base64: str | None
+    ) -> dict[str, Any]:
+        capture = self._enqueue_pending_capture(message, url, data_base64)
+        self.context.events.post(
+            Events.BROWSER_EVENT,
+            {
+                "url": url,
+                "source": message.get("source"),
+                "pending_capture_id": capture.id,
+                "filename": capture.filename,
+            },
+        )
+        return {
+            "type": "capture_pending",
+            "id": capture.id,
+            "url": url,
+            "filename": capture.filename or "",
+        }
 
     def _capture_chunk(self, message: dict[str, Any]) -> dict[str, Any]:
         """Assemble a chunked in-memory capture, then run the normal capture flow.
@@ -396,7 +411,12 @@ class BrowserManager:
                 "rejected": True,
             },
         )
-        return {"type": "capture_skipped", "id": capture.id, "url": url}
+        return {
+            "type": "capture_skipped",
+            "id": capture.id,
+            "url": url,
+            "message": "'Skip all' is active in MagnetoClip — re-enable captures from its Browser settings.",
+        }
 
     def _page_scan(self, message: dict[str, Any]) -> dict[str, Any]:
         """Record downloadable files found on a page by the extension."""
@@ -406,9 +426,28 @@ class BrowserManager:
         files = message.get("files") or []
         if not page_url:
             return {"type": "page_scan_error", "message": "missing page url"}
+        log.info(
+            "page_scan_received",
+            url=page_url,
+            count=len(files),
+            source="extension",
+        )
+        # Blob/data URIs are page-bound (only the creating tab can resolve
+        # them); their bytes already travelled through the capture path, and
+        # keeping them here would re-notify on every rescan because Telegram
+        # mints a fresh UUID per render.
+        files = [
+            f
+            for f in files
+            if not str(f.get("url") or "").startswith(("blob:", "data:"))
+        ]
         with self.context.session_factory() as session:
             repo = BrowserDetectionRepository(session)
-            repo.add(page_url, count=len(files), files=files[:50])
+            known = repo.known_file_urls()
+            has_new = any(
+                str(f.get("url") or "").strip() not in known for f in files
+            )
+            repo.add(page_url, count=len(files), files=files[:50], notified=not has_new)
         self.context.events.post(
             Events.BROWSER_EVENT,
             {"url": page_url, "source": "page_scan", "count": len(files)},

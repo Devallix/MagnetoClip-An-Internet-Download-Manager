@@ -77,7 +77,17 @@ function showCaptureError(message) {
   els.errorBox.style.display = "block";
 }
 
+function restoreButton(button) {
+  if (!button) {
+    return;
+  }
+  button.disabled = false;
+  button.textContent = "Download";
+  button.classList.remove("sent");
+}
+
 function sendDownload(file, pageUrl, button) {
+  let settled = false;
   try {
     chrome.runtime.sendMessage(
       {
@@ -88,39 +98,59 @@ function sendDownload(file, pageUrl, button) {
         detected_type: file.detected_type || "file",
       },
       (response) => {
+        settled = true;
         if (chrome.runtime.lastError) {
-          if (button) {
-            button.disabled = false;
-            button.textContent = "Download";
-            button.classList.remove("sent");
-          }
+          restoreButton(button);
           showCaptureError(chrome.runtime.lastError.message);
           return;
         }
         if (!response) {
+          restoreButton(button);
+          showCaptureError("No response from MagnetoClip.");
           return;
         }
         if (response.type === "capture_error") {
-          if (button) {
-            button.disabled = false;
-            button.textContent = "Download";
-            button.classList.remove("sent");
-          }
+          restoreButton(button);
           showCaptureError(
             response.message || "MagnetoClip could not download this file."
           );
+          return;
         }
+        if (response.type === "capture_skipped") {
+          restoreButton(button);
+          showCaptureError(
+            response.message ||
+              "'Skip all' is active in MagnetoClip — turn it off in its settings."
+          );
+          return;
+        }
+        // capture_ok / capture_pending: the app has it; the confirmation
+        // dialog (with full file info) appears in MagnetoClip itself.
       }
     );
+    setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      restoreButton(button);
+      showCaptureError("MagnetoClip did not respond. Is the app running?");
+    }, TIMEOUT_MS);
   } catch (error) {
     if (/Extension context invalidated/i.test(String(error && error.message))) {
       setError("The extension was updated. Reload this page and try again.");
+      restoreButton(button);
     }
   }
 }
 
 function renderDetected(data) {
-  const files = (data && data.files) || [];
+  // Blob/data entries only resolve inside their creating page; the popup has
+  // no bytes to hand over, so offering them would just fail. They remain
+  // reachable through MagnetoClip's capture flow.
+  const files = ((data && data.files) || []).filter(
+    (file) => file && file.url && !/^(blob|data):/i.test(file.url)
+  );
   els.detectedList.replaceChildren();
   if (!files.length) {
     els.detectedEmpty.style.display = "block";

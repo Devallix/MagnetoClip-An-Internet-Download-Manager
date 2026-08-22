@@ -323,7 +323,7 @@ def test_browser_page_constructs(qtbot, context):
     qtbot.addWidget(window)
     window._activate("Browser")
     page = window._pages["Browser"]
-    assert page.integration_check.isChecked() is False
+    assert page.integration_check.isChecked() is True
     assert page.capture_check.isChecked() is True
     assert page.prepare_button is not None
     assert page.redetect_button is not None
@@ -767,7 +767,9 @@ def test_detected_page_shows_source_page(qtbot, context):
             count=1,
             files=[
                 {
-                    "url": "blob:https://www.web.telegram.org/abc",
+                    # Blob URIs without inline bytes are deliberately hidden
+                    # from the Detected page (unactionable), so use a real URL.
+                    "url": "https://cdn.telegram.org/file/abc.jpg",
                     "filename": "clip.jpg",
                     "detected_type": "image",
                 }

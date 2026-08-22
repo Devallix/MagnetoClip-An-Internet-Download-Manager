@@ -729,6 +729,12 @@
   }
 
   function addDirect(direct, url, detectedType) {
+    // Site chrome masquerading as media: Telegram's notification sound and
+    // bundled UI assets show up as ordinary resource entries.
+    const clean = (url || "").split(/[?#]/)[0];
+    if (/notification\.(mp3|ogg|wav)$/i.test(clean) || /\/(a|k)\/assets\//i.test(clean)) {
+      return;
+    }
     if (!direct.has(url)) {
       direct.set(url, detectedType);
     }
