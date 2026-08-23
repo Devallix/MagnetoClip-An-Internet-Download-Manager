@@ -1,10 +1,10 @@
 {
-    "version": "0.2.0",
-    "download_url": "https://github.com/Devallix/MagnetoClip-An-Internet-Download-Manager/raw/refs/heads/main/releases/MagnetoClip-0.2.0.zip",
-    "release_notes": "Upgraded to Version 0.2.0 (Added torrent downloaded functionality and youtube download bug fixes)",
-    "release_date": "2026-08-20",
+    "version": "0.2.2",
+    "download_url": "https://github.com/Devallix/MagnetoClip-An-Internet-Download-Manager/raw/refs/heads/main/releases/MagnetoClip-0.2.2.zip",
+    "release_notes": "Upgraded to Version 0.2.2 (Browser integration overhaul: Telegram Web photo/video capture, popup download flow with confirmation dialog, Detected page actions with context menu and cookies, duplicate detection notifications removed, Skip-all state surfaced, torrent queue fixes)",
+    "release_date": "2026-08-22",
     "min_version": "0.1.0",
-    "size_bytes": 77214045,
-    "filename": "MagnetoClip-0.2.0.zip",
-    "sha256": "f87d51ec2091a7378a28ff8fdb4cd6d6f6acafd5c889359661d7b132e49a1f3a"
+    "size_bytes": 77214618,
+    "filename": "MagnetoClip-0.2.2.zip",
+    "sha256": "7faf28dd1c1cba36e08ffd5feb852a24ea1030c598dd06108d157597b96e51aa"
 }

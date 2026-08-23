@@ -81,7 +81,7 @@ class UpdateChecker:
 
         The manifest.json format:
         {
-            "version": "0.2.0",
+            "version": "0.2.2",
             "download_url": "https://releases.magnetoclip.dev/...",
             "release_notes": "...",
             "release_date": "2026-01-15",
