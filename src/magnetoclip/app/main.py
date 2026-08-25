@@ -4,6 +4,8 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from magnetoclip.core.events.bus import Events
+
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -16,7 +18,6 @@ if sys.platform == "win32":
 
 import qasync
 from PySide6.QtWidgets import QApplication, QMessageBox
-
 from magnetoclip.app.lifecycle import acquire_single_instance_lock, build_context
 from magnetoclip.browser.manager import BrowserManager
 from magnetoclip.browser.native_messaging.host import run_host
@@ -79,6 +80,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         QMessageBox.information(None, "MagnetoClip", "MagnetoClip is already running.")
         return 1
 
+    # License gate: verify online before anything else runs (v1 policy).
+    from magnetoclip.ui.dialogs.activation import run_activation_gate
+
+    if not run_activation_gate(context):
+        log.info("license_gate_aborted")
+        lock.unlock()
+        return 1
+
     loop = qasync.QEventLoop(app)
     asyncio.set_event_loop(loop)
 
@@ -108,6 +117,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         splash.close_with_fade()
         window.show()
         log.info("main_window_shown")
+
+        # Bring up the LAN dashboard while the window task is safely
+        # suspended: creating tasks during a synchronous stretch of this
+        # coroutine risks qasync stepping them re-entrantly (Py3.13 guard).
+        from magnetoclip.services.remote import ensure_server
+
+        asyncio.ensure_future(ensure_server(context))
 
         if magnet_uri_arg:
             from PySide6.QtCore import QTimer

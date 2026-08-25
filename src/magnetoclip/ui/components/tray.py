@@ -20,6 +20,7 @@ class SystemTray:
         self._message_download_id: int | None = None
         self._message_action: str | None = None
         self._action_callbacks: dict[str, callable] = {}
+        self._remote_callback = None
         self._icon = QSystemTrayIcon(parent)
         self._icon.setIcon(app_icon())
         self._icon.setToolTip("MagnetoClip")
@@ -41,6 +42,12 @@ class SystemTray:
         self.resume_action.triggered.connect(lambda: self._for_each("resume"))
         menu.addAction(self.pause_action)
         menu.addAction(self.resume_action)
+        self.remote_action = QAction("Open Remote…")
+        self.remote_action.triggered.connect(self._trigger_remote)
+        menu.addAction(self.remote_action)
+        self.license_action = QAction("License…")
+        self.license_action.triggered.connect(self._trigger_license)
+        menu.addAction(self.license_action)
         menu.addSeparator()
         self.exit_action = QAction("Exit")
         self.exit_action.triggered.connect(QApplication.instance().quit)
@@ -72,6 +79,20 @@ class SystemTray:
 
     def register_action(self, action: str, callback) -> None:
         self._action_callbacks[action] = callback
+
+    def set_remote_callback(self, callback) -> None:
+        self._remote_callback = callback
+
+    def set_license_callback(self, callback) -> None:
+        self._license_callback = callback
+
+    def _trigger_remote(self) -> None:
+        if self._remote_callback is not None:
+            self._remote_callback()
+
+    def _trigger_license(self) -> None:
+        if self._license_callback is not None:
+            self._license_callback()
 
     def _on_message_clicked(self) -> None:
         action = self._message_action

@@ -278,6 +278,65 @@ class SettingsPage(Page):
         updates_form.addRow("", buttons_row)
         layout.addLayout(updates_form)
 
+        remote_label = QLabel("Remote Control")
+        remote_label.setObjectName("page_subtitle")
+        layout.addWidget(remote_label)
+
+        remote_form = QFormLayout()
+        remote_form.setSpacing(12)
+
+        self.remote_enabled_check = QCheckBox(
+            "Enable remote dashboard (local network only)"
+        )
+        self.remote_enabled_check.setToolTip(
+            "Control MagnetoClip from your phone or another browser on the "
+            "same Wi-Fi/LAN. The dashboard never exposes your filesystem."
+        )
+        remote_form.addRow("", self.remote_enabled_check)
+
+        self.remote_port_spin = QSpinBox()
+        self.remote_port_spin.setRange(1024, 65535)
+        remote_form.addRow("Dashboard port", self.remote_port_spin)
+
+        remote_buttons_row = QHBoxLayout()
+        self.remote_qr_button = QPushButton("Show QR…")
+        self.remote_qr_button.clicked.connect(self._show_remote_pairing)
+        remote_buttons_row.addWidget(self.remote_qr_button)
+
+        self.remote_regen_button = QPushButton("Regenerate Token")
+        self.remote_regen_button.clicked.connect(self._regenerate_remote_token)
+        remote_buttons_row.addWidget(self.remote_regen_button)
+        remote_buttons_row.addStretch(1)
+        remote_form.addRow("", remote_buttons_row)
+
+        self.remote_status_label = QLabel("Off")
+        self.remote_status_label.setObjectName("updates_status")
+        remote_form.addRow("Server status", self.remote_status_label)
+        layout.addLayout(remote_form)
+
+        license_label = QLabel("License")
+        license_label.setObjectName("page_subtitle")
+        layout.addWidget(license_label)
+
+        license_form = QFormLayout()
+        license_form.setSpacing(12)
+
+        self.license_serial_label = QLabel("Not activated")
+        self.license_serial_label.setObjectName("updates_status")
+        license_form.addRow("Serial", self.license_serial_label)
+
+        self.license_validated_label = QLabel("Never")
+        self.license_validated_label.setObjectName("updates_status")
+        license_form.addRow("Last verified", self.license_validated_label)
+
+        license_buttons_row = QHBoxLayout()
+        self.license_deactivate_button = QPushButton("Deactivate this PC…")
+        self.license_deactivate_button.clicked.connect(self._deactivate_license)
+        license_buttons_row.addWidget(self.license_deactivate_button)
+        license_buttons_row.addStretch(1)
+        license_form.addRow("", license_buttons_row)
+        layout.addLayout(license_form)
+
         self._pending_update_info = None
         self._downloaded_installer = None
         layout.addLayout(form)
@@ -350,6 +409,70 @@ class SettingsPage(Page):
             self.updates_status_label.setText(last_checked)
         else:
             self.updates_status_label.setText("Never")
+
+        self.remote_enabled_check.setChecked(bool(s.get("remote.enabled", False)))
+        self.remote_port_spin.setValue(int(s.get("remote.port", 8477)))
+        self._refresh_remote_status()
+        self._refresh_license_labels()
+
+    def _refresh_license_labels(self) -> None:
+        from magnetoclip.services.licensing.state import (
+            format_masked_serial,
+            last_validated_text,
+            read_serial,
+        )
+
+        serial = read_serial()
+        self.license_serial_label.setText(
+            format_masked_serial(serial) if serial else "Not activated"
+        )
+        self.license_validated_label.setText(
+            last_validated_text(self.context.settings)
+        )
+        self.license_deactivate_button.setEnabled(bool(serial))
+
+    def _deactivate_license(self) -> None:
+        from magnetoclip.services.licensing.state import (
+            build_client_from_settings,
+            read_serial,
+        )
+        from magnetoclip.ui.dialogs.activation import _LicenseWorker
+
+        serial = read_serial()
+        if not serial:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Deactivate License",
+            "Deactivate MagnetoClip on this PC?\n\nThe serial key will be freed "
+            "so it can be used on another computer.",
+        )
+        if answer != QMessageBox.Yes:
+            return
+        client = build_client_from_settings(self.context.settings)
+        self._license_worker = _LicenseWorker(client, "deactivate", serial)
+        self._license_worker.done.connect(
+            lambda data, exc: self._on_license_deactivated(serial, exc)
+        )
+        self._license_worker.start()
+
+    def _on_license_deactivated(self, serial: str, exc: Exception | None) -> None:
+        from magnetoclip.services.licensing.state import clear_serial
+
+        if isinstance(exc, Exception):
+            QMessageBox.warning(
+                self,
+                "Deactivate License",
+                f"Could not deactivate:\n{exc}\n\nThe key was NOT removed from this PC.",
+            )
+            return
+        clear_serial()
+        self._refresh_license_labels()
+        QMessageBox.information(
+            self,
+            "Deactivate License",
+            "This PC has been deactivated.\nMagnetoClip will ask for a serial key on next launch.",
+        )
 
     def _browse_directory(self) -> None:
         directory = QFileDialog.getExistingDirectory(self, "Default download folder")
@@ -526,6 +649,112 @@ class SettingsPage(Page):
                     f"{installer_path}",
                 )
 
+    def _refresh_remote_status(self) -> None:
+        server = getattr(self.context, "remote", None)
+        if server is not None and getattr(server, "running", False):
+            self.remote_status_label.setText(f"Running on port {server.port}")
+        elif bool(self.context.settings.get("remote.enabled", False)):
+            self.remote_status_label.setText("Enabled (not running)")
+        else:
+            self.remote_status_label.setText("Off")
+
+    def _show_remote_pairing(self) -> None:
+        from ..dialogs.remote_pair import RemotePairDialog
+
+        server = getattr(self.context, "remote", None)
+        if server is None or not getattr(server, "running", False):
+            QMessageBox.information(
+                self,
+                "Remote Control",
+                "The remote dashboard is not running. Enable it and press "
+                "Save Settings first.",
+            )
+            return
+        RemotePairDialog(server, parent=self).exec()
+
+    def _regenerate_remote_token(self) -> None:
+        """Generate a fresh pairing token; revokes paired devices instantly."""
+        import secrets as _secrets
+
+        from magnetoclip.database.repositories import SettingsStore
+
+        token = _secrets.token_urlsafe(24)
+        s = self.context.settings
+        s.set("remote.token", token)
+        SettingsStore(self.context.session_factory).save_many(s.to_store_dict())
+        QMessageBox.information(
+            self,
+            "Remote Control",
+            "A new pairing token was generated. Previously paired devices "
+            "must pair again.",
+        )
+
+    def _schedule_remote(self, coro, done=None) -> None:
+        """Schedule server work on the loop, tolerating re-entrancy limits.
+
+        qasync (Python 3.13) refuses to step a new task while another task
+        is mid-step; closing the coroutine keeps that edge non-fatal.
+        """
+        import asyncio
+
+        try:
+            task = asyncio.ensure_future(coro)
+        except RuntimeError:
+            coro.close()
+            return
+        if done is not None:
+            task.add_done_callback(lambda _: done())
+
+    def _apply_remote_changes(self) -> None:
+        """Start/stop/restart the live remote server to match saved settings."""
+        import asyncio
+
+        from ...services.remote.server import RemoteServer
+
+        enabled = bool(self.context.settings.get("remote.enabled", False))
+        port = int(self.context.settings.get("remote.port", 8477))
+        server = getattr(self.context, "remote", None)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if not enabled:
+            if server is not None and server.running:
+                if loop is None:
+                    return
+                self._schedule_remote(
+                    server.stop(), done=self._refresh_remote_status
+                )
+            self._refresh_remote_status()
+            return
+
+        if server is None:
+            server = RemoteServer(self.context)
+            self.context.remote = server
+        server.port = port
+        if server.running:
+            if server.port != port:
+
+                async def _chain() -> None:
+                    await server.stop()
+                    server.port = int(
+                        server.context.settings.get("remote.port", server.port)
+                    )
+                    await server.start()
+                    self._refresh_remote_status()
+
+                self._schedule_remote(_chain())
+                return
+        else:
+            if loop is None:
+                return
+            self._schedule_remote(
+                server.start(), done=self._refresh_remote_status
+            )
+        self._refresh_remote_status()
+
     def save(self) -> None:
         from magnetoclip.database.repositories import SettingsStore
         from magnetoclip.ui.themes import apply_theme
@@ -594,9 +823,21 @@ class SettingsPage(Page):
         s.set("updates.check_enabled", self.updates_check_enabled.isChecked())
         s.set("updates.endpoint", self.updates_endpoint_edit.text())
 
+        if (
+            self.remote_enabled_check.isChecked()
+            and not str(s.get("remote.token", ""))
+        ):
+            import secrets as _secrets
+
+            s.set("remote.token", _secrets.token_urlsafe(24))
+        s.set("remote.enabled", self.remote_enabled_check.isChecked())
+        s.set("remote.port", self.remote_port_spin.value())
+
         store = SettingsStore(self.context.session_factory)
         store.save_many(s.to_store_dict())
         self.context.events.post(Events.SETTINGS_CHANGED, s.as_dict())
+
+        self._apply_remote_changes()
 
         window = self.window()
         apply_theme(window, theme=s.get("appearance.theme", "dark"))

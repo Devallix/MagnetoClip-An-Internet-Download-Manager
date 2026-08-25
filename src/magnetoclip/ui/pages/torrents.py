@@ -221,7 +221,11 @@ class TorrentsPage(Page):
         download_id = snapshot["id"]
         if not self._matches(snapshot):
             self._remove_row(download_id)
+            self._update_empty_state()
             return
+        # Drop the placeholder row first so new-row indices and the
+        # id->row map stay in sync when the table shifts up.
+        self._clear_empty_row()
         row = self._rows.get(download_id)
         if row is None:
             row = self.table.rowCount()
@@ -240,6 +244,7 @@ class TorrentsPage(Page):
             self._ids.append(download_id)
         self._snapshots[download_id] = snapshot
         self._populate_row(row, snapshot)
+        self._update_empty_state()
 
     def _make_progress_cell(self) -> QWidget:
         widget = QWidget()
@@ -326,6 +331,12 @@ class TorrentsPage(Page):
         for did, r in list(self._rows.items()):
             if r > row:
                 self._rows[did] = r - 1
+
+    def _clear_empty_row(self) -> None:
+        if self._empty_row is None:
+            return
+        self.table.removeRow(self._empty_row)
+        self._empty_row = None
 
     def _update_empty_state(self) -> None:
         if self.table.rowCount() == 0:

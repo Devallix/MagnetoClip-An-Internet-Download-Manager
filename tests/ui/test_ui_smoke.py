@@ -836,3 +836,44 @@ def test_detected_page_select_all(qtbot, context):
     page._toggle_select_all()
     assert page._selected_indexes() == []
     assert not page.download_button.isEnabled()
+
+def test_torrents_page_placeholder_does_not_desync_rows(qtbot, context):
+    """Regression: the empty-state placeholder row used to shift row indices.
+
+    Adding the first torrent while the placeholder was visible recorded
+    id->row 1; removing the placeholder then shifted the real row to 0, so
+    the next update event hit item(1, x) == None and crashed the bus.
+    """
+    from magnetoclip.ui.pages.torrents import TorrentsPage
+
+    page = TorrentsPage(context)
+    qtbot.addWidget(page)
+
+    # the constructor shows the placeholder for an empty table
+    assert page._empty_row == 0
+    assert page.table.rowCount() == 1
+
+    snapshot = {
+        "id": 1,
+        "detected_type": "torrent",
+        "filename": "ubuntu.iso",
+        "url": "magnet:?xt=urn:btih:abc",
+        "status": "downloading",
+        "speed": 1024.0,
+        "size_total": 1000,
+        "size_downloaded": 100,
+        "torrent_num_peers": 1,
+        "torrent_num_seeds": 2,
+    }
+    page._on_added(snapshot)
+    assert page.table.rowCount() == 1
+    assert page._rows[1] == 0
+    assert page.table.item(0, 1).text() == "ubuntu.iso"
+
+    page._on_updated(dict(snapshot, size_downloaded=500))
+    assert page._rows[1] == 0
+    assert page.table.item(0, 1).text() == "ubuntu.iso"
+
+    page._on_removed({"id": 1})
+    assert page.table.rowCount() == 1
+    assert page._empty_row == 0

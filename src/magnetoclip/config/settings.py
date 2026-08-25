@@ -63,6 +63,16 @@ DEFAULTS: dict[str, Any] = {
     "updates.endpoint": "https://releases.magnetoclip.dev/manifest.json",
     "updates.last_checked": "",
     "updates.last_version": "",
+    # Remote control (LAN dashboard)
+    "remote.enabled": False,
+    "remote.port": 8477,
+    "remote.token": "",  # generated via secrets.token_urlsafe on first enable
+    # Licensing (serial lives in the OS keychain, not here).
+    # Empty endpoint = licensing disabled (dev); release builds embed the
+    # production URL + public key here.
+    "license.endpoint": "https://magnetocliplicenseadmin.pythonanywhere.com/",
+    "license.public_key": "GoQTJxkad4rZkdqcU22fEAmaBKp7ml99lNguTcITCig=",  # Ed25519 pin; embedded constant used when empty
+    "license.last_validated": "",
 }
 
 

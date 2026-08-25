@@ -43,6 +43,10 @@ datas.append(
      "magnetoclip/resources/icons")
 )
 datas.append(
+    (str(ROOT / "src" / "magnetoclip" / "resources" / "remote"),
+     "magnetoclip/resources/remote")
+)
+datas.append(
     (str(ROOT / "img"),
      "img")
 )

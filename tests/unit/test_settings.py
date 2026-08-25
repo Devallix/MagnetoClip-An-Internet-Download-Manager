@@ -37,3 +37,20 @@ def test_store_roundtrip_preserves_defaults():
 def test_default_directory_points_to_user_downloads():
     settings = Settings()
     assert settings.get("downloads.default_directory")
+
+
+def test_remote_keys_defaults():
+    settings = Settings()
+    assert settings.get("remote.enabled") is False
+    assert settings.get("remote.port") == 8477
+    assert settings.get("remote.token") == ""
+
+
+def test_remote_keys_store_roundtrip():
+    settings = Settings(
+        {"remote.enabled": True, "remote.port": 9000, "remote.token": "abc"}
+    )
+    restored = Settings.from_store(settings.to_store_dict())
+    assert restored.get("remote.enabled") is True
+    assert restored.get("remote.port") == 9000
+    assert restored.get("remote.token") == "abc"

@@ -159,27 +159,40 @@ class UpdateDownloader:
 
         bat_path = staging_dir / "_swap.bat"
         exe_name = "MagnetoClip.exe"
+        # Identify *this* process specifically. Waiting on the image name is
+        # not enough: the browser-integration native host runs the very same
+        # MagnetoClip.exe, so a name-based loop spins forever while any host
+        # instance lives.
+        main_pid = os.getpid()
 
         # The batch script:
-        #   1. Waits until MagnetoClip.exe is no longer running.
-        #   2. Removes old _internal/ and the old exe.
-        #   3. Copies fresh files from staging into the install dir.
-        #   4. Cleans up the staging directory and itself.
-        #   5. Restarts the application.
+        #   1. Waits until the main app process (by PID) has exited.
+        #   2. Force-stops leftover helper instances (browser-host), which
+        #      would otherwise keep the executable locked.
+        #   3. Removes old _internal/ and the old exe.
+        #   4. Copies fresh files from staging into the install dir.
+        #   5. Cleans up the staging directory and itself, then restarts.
+        # ``ping`` is used as the sleep because ``timeout`` misbehaves without
+        # an interactive console.
         bat_content = (
             "@echo off\r\n"
-            "REM --- wait for MagnetoClip to exit ---\r\n"
+            "REM --- wait for the main MagnetoClip process to exit ---\r\n"
             ":wait_loop\r\n"
-            "timeout /t 1 /nobreak >nul\r\n"
-            f'tasklist /FI "IMAGENAME eq {exe_name}" 2>NUL | find /I "{exe_name}" >NUL\r\n'
+            "ping -n 2 127.0.0.1 >NUL\r\n"
+            f'tasklist /FI "PID eq {main_pid}" 2>NUL | find /I "{main_pid}" >NUL\r\n'
             "if %ERRORLEVEL% == 0 goto wait_loop\r\n"
+            "\r\n"
+            "REM --- stop leftover helper instances (browser-host) ---\r\n"
+            f'taskkill /f /im {exe_name} >NUL 2>&1\r\n'
+            "ping -n 2 127.0.0.1 >NUL\r\n"
             "\r\n"
             "REM --- remove old files ---\r\n"
             f'rmdir /s /q "{install_dir}\\_internal"\r\n'
-            f'del /f /q "{install_dir}\\{exe_name}" 2>NUL\r\n'
+            f'del /f /q "{install_dir}\\{exe_name}" >NUL 2>&1\r\n'
             "\r\n"
             "REM --- copy new files ---\r\n"
-            f'xcopy /s /e /y /q "{staging_dir}\\*" "{install_dir}\\" >NUL\r\n'
+            f'xcopy /i /s /e /y /q "{staging_dir}\\*" "{install_dir}\\" >NUL\r\n'
+            f'del /f /q "{install_dir}\\_swap.bat" >NUL 2>&1\r\n'
             "\r\n"
             "REM --- cleanup ---\r\n"
             f'rmdir /s /q "{staging_dir}"\r\n'
@@ -193,7 +206,7 @@ class UpdateDownloader:
 
         subprocess.Popen(
             ["cmd", "/c", str(bat_path)],
-            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
         log.info("update_batch_launched")
         return True

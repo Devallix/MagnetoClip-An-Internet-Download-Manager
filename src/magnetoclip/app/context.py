@@ -31,6 +31,7 @@ class AppContext:
     notifier: object = None
     browser: object = None
     torrent_client: object = None
+    remote: object = None
 
     def __post_init__(self) -> None:
         self.session_factory = self.database.Session
@@ -39,6 +40,12 @@ class AppContext:
         return self.session_factory()
 
     async def shutdown(self) -> None:
+        remote = getattr(self, "remote", None)
+        if remote is not None:
+            try:
+                await remote.stop()
+            except Exception:
+                log.warning("remote_server_shutdown_failed", exc_info=True)
         torrent_client = getattr(self, "torrent_client", None)
         if torrent_client is not None:
             try:

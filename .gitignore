@@ -36,3 +36,10 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# ENVIROMENT VARIABLE
+env
+
+# LICENSE SERVER/LICENSE DATA
+license-server/
+license_data/

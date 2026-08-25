@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer
 from PySide6.QtGui import QPixmap, QResizeEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -135,6 +135,8 @@ class MainWindow(QMainWindow):
         self.tray = SystemTray(context, parent=self)
         self.tray.set_open_callback(self.show)
         self.tray.register_action("detected", self._open_detected)
+        self.tray.set_remote_callback(self._open_remote_pairing)
+        self.tray.set_license_callback(self._show_license_info)
         self.tray.show()
         notifier = getattr(context, "notifier", None)
         if notifier is not None:
@@ -419,6 +421,45 @@ class MainWindow(QMainWindow):
         self._nav_buttons["downloads"].setChecked(True)
         self.stack.setCurrentWidget(page)
 
+    # ----- remote control -----
+
+    def _open_remote_pairing(self) -> None:
+        server = getattr(self.context, "remote", None)
+        if server is None or not getattr(server, "running", False):
+            return
+        from .dialogs.remote_pair import RemotePairDialog
+
+        RemotePairDialog(server, parent=self).exec()
+
+    # ----- license -----
+
+    def _show_license_info(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        from magnetoclip.services.licensing.state import (
+            format_masked_serial,
+            last_validated_text,
+            read_serial,
+        )
+
+        serial = read_serial()
+        if not serial:
+            QMessageBox.information(
+                self,
+                "License",
+                "MagnetoClip is not activated on this PC.\n"
+                "Manage your license in Settings after activation.",
+            )
+            return
+        QMessageBox.information(
+            self,
+            "License",
+            f"Serial: {format_masked_serial(serial)}\n"
+            f"Last verified online: {last_validated_text(self.context.settings)}\n\n"
+            "MagnetoClip verifies this license with the vendor server at every "
+            "launch. Manage devices under Settings → License.",
+        )
+
     # ----- status -----
 
     def _on_network_changed(self, payload) -> None:
@@ -521,6 +562,14 @@ class MainWindow(QMainWindow):
         watcher = getattr(self, "_capture_watcher", None)
         if watcher is not None:
             watcher.stop()
+        server = getattr(self.context, "remote", None)
+        if server is not None and getattr(server, "running", False):
+            import asyncio
+
+            try:
+                asyncio.ensure_future(server.stop())
+            except RuntimeError:
+                pass
         super().closeEvent(event)
 
     def showEvent(self, event) -> None:
