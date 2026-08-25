@@ -11,6 +11,8 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -29,9 +31,59 @@ from ..dialogs.proxy import ProxyDialog
 from .base import Page, make_scrollable
 
 
-class _UpdateCheckWorker(QThread):
-    """Background worker for update checks (avoids qasync task conflicts)."""
+# ── helpers ──────────────────────────────────────────────────────────────────
 
+
+def _card(title: str) -> tuple[QFrame, QVBoxLayout]:
+    """Return (frame, inner layout) styled as a section card."""
+    frame = QFrame()
+    frame.setObjectName("card")
+    layout = QVBoxLayout(frame)
+    layout.setContentsMargins(16, 14, 16, 14)
+    layout.setSpacing(10)
+    lbl = QLabel(title)
+    lbl.setObjectName("card_title")
+    layout.addWidget(lbl)
+    return frame, layout
+
+
+def _check(text: str, tooltip: str = "") -> QCheckBox:
+    cb = QCheckBox(text)
+    if tooltip:
+        cb.setToolTip(tooltip)
+    return cb
+
+
+def _spin(lo: int, hi: int, suffix: str = "", tooltip: str = "") -> QSpinBox:
+    s = QSpinBox()
+    s.setRange(lo, hi)
+    if suffix:
+        s.setSuffix(" " + suffix)
+    if tooltip:
+        s.setToolTip(tooltip)
+    return s
+
+
+def _dspin(lo: float, hi: float, suffix: str = "") -> QDoubleSpinBox:
+    s = QDoubleSpinBox()
+    s.setRange(lo, hi)
+    if suffix:
+        s.setSuffix(" " + suffix)
+    return s
+
+
+def _browse_btn(slot, tooltip: str = "Choose folder") -> QPushButton:
+    b = QPushButton("Browse…")
+    b.setToolTip(tooltip)
+    b.setFixedWidth(90)
+    b.clicked.connect(slot)
+    return b
+
+
+# ── background workers ───────────────────────────────────────────────────────
+
+
+class _UpdateCheckWorker(QThread):
     finished = Signal(object)
 
     def __init__(self, endpoint: str, current_version: str, parent=None) -> None:
@@ -42,14 +94,12 @@ class _UpdateCheckWorker(QThread):
     def run(self) -> None:
         from magnetoclip.services.updates import UpdateChecker
 
-        checker = UpdateChecker(self._endpoint)
-        result = checker.check_sync(self._current_version)
-        self.finished.emit(result)
+        self.finished.emit(
+            UpdateChecker(self._endpoint).check_sync(self._current_version)
+        )
 
 
 class _UpdateDownloadWorker(QThread):
-    """Background worker for update downloads (avoids qasync task conflicts)."""
-
     progress = Signal(object)
     finished = Signal(object)
 
@@ -62,11 +112,14 @@ class _UpdateDownloadWorker(QThread):
         from magnetoclip.services.updates import UpdateDownloader
 
         self._downloader = UpdateDownloader()
-        result = self._downloader.download_sync(
-            self._update_info,
-            on_progress=lambda p: self.progress.emit(p),
+        self.finished.emit(
+            self._downloader.download_sync(
+                self._update_info, on_progress=lambda p: self.progress.emit(p)
+            )
         )
-        self.finished.emit(result)
+
+
+# ── settings page ────────────────────────────────────────────────────────────
 
 
 class SettingsPage(Page):
@@ -75,6 +128,7 @@ class SettingsPage(Page):
 
         layout = make_scrollable(self)
 
+        # ── page header ──────────────────────────────────────────────────────
         header = QVBoxLayout()
         title = QLabel("Settings")
         title.setObjectName("page_title")
@@ -84,264 +138,316 @@ class SettingsPage(Page):
         header.addWidget(subtitle)
         layout.addLayout(header)
 
-        form = QFormLayout()
-        form.setSpacing(12)
+        # ── section: General ─────────────────────────────────────────────────
+        card, cl = _card("General")
+        grid = QGridLayout()
+        grid.setSpacing(12)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
 
-        self.simultaneous_spin = QSpinBox()
-        self.simultaneous_spin.setRange(1, 32)
-        form.addRow("Simultaneous downloads", self.simultaneous_spin)
-
-        self.connections_spin = QSpinBox()
-        self.connections_spin.setRange(1, 64)
-        form.addRow("Connections per download", self.connections_spin)
-
-        self.bandwidth_spin = QDoubleSpinBox()
-        self.bandwidth_spin.setRange(0, 100000)
-        self.bandwidth_spin.setSuffix(" MB/s")
-        form.addRow("Max bandwidth (0 = unlimited)", self.bandwidth_spin)
-
-        self.user_agent_edit = QLineEdit()
-        form.addRow("User agent", self.user_agent_edit)
-
-        self.timeout_spin = QSpinBox()
-        self.timeout_spin.setRange(5, 300)
-        self.timeout_spin.setSuffix(" s")
-        form.addRow("Timeout", self.timeout_spin)
-
-        self.retry_spin = QSpinBox()
-        self.retry_spin.setRange(0, 20)
-        form.addRow("Max retries", self.retry_spin)
-
-        self.directory_edit = QLineEdit()
-        browse = QPushButton("Browse…")
-        browse.clicked.connect(self._browse_directory)
-        directory_row = QHBoxLayout()
-        directory_row.addWidget(self.directory_edit, 1)
-        directory_row.addWidget(browse)
-        form.addRow("Default download folder", directory_row)
-
+        grid.addWidget(QLabel("Theme"), 0, 0)
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(["dark", "light"])
-        form.addRow("Theme", self.theme_combo)
+        self.theme_combo.setFixedWidth(120)
+        grid.addWidget(self.theme_combo, 0, 1)
 
-        self.startup_check = QCheckBox("Start with system")
-        form.addRow("", self.startup_check)
+        grid.addWidget(QLabel("Default download folder"), 0, 2)
+        self.directory_edit = QLineEdit()
+        grid.addWidget(self.directory_edit, 0, 3)
+        grid.addWidget(_browse_btn(self._browse_directory), 0, 4)
 
-        self.auto_categorize_check = QCheckBox("Auto-categorize by file type")
-        form.addRow("", self.auto_categorize_check)
+        self.startup_check = _check("Start with system")
+        self.auto_categorize_check = _check("Auto-categorize by file type")
+        grid.addWidget(self.startup_check, 1, 0, 1, 2)
+        grid.addWidget(self.auto_categorize_check, 1, 2, 1, 3)
 
-        self.confirm_capture_check = QCheckBox(
+        cl.addLayout(grid)
+        layout.addWidget(card)
+
+        # ── section: Downloads ───────────────────────────────────────────────
+        card, cl = _card("Downloads")
+        grid = QGridLayout()
+        grid.setSpacing(12)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
+
+        grid.addWidget(QLabel("Simultaneous downloads"), 0, 0)
+        self.simultaneous_spin = _spin(1, 32)
+        grid.addWidget(self.simultaneous_spin, 0, 1)
+
+        grid.addWidget(QLabel("Connections per download"), 0, 2)
+        self.connections_spin = _spin(1, 64)
+        grid.addWidget(self.connections_spin, 0, 3)
+
+        grid.addWidget(QLabel("Max bandwidth (0 = unlimited)"), 1, 0)
+        self.bandwidth_spin = _dspin(0, 100000, "MB/s")
+        grid.addWidget(self.bandwidth_spin, 1, 1)
+
+        grid.addWidget(QLabel("Timeout"), 1, 2)
+        self.timeout_spin = _spin(5, 300, "s")
+        grid.addWidget(self.timeout_spin, 1, 3)
+
+        grid.addWidget(QLabel("Max retries"), 2, 0)
+        self.retry_spin = _spin(0, 20)
+        grid.addWidget(self.retry_spin, 2, 1)
+
+        cl.addLayout(grid)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(6)
+        self.user_agent_edit = QLineEdit()
+        self.user_agent_edit.setPlaceholderText("Keep default if unsure")
+        form.addRow("User agent", self.user_agent_edit)
+        cl.addLayout(form)
+
+        layout.addWidget(card)
+
+        # ── section: Browser & Capture ───────────────────────────────────────
+        card, cl = _card("Browser & Capture")
+        self.confirm_capture_check = _check(
             "Show a confirmation dialog before downloading browser captures"
         )
-        form.addRow("", self.confirm_capture_check)
-
-        self.skip_all_check = QCheckBox(
-            "Skip all detected files without asking (turns the confirmation dialog back on when unchecked)"
+        self.skip_all_check = _check(
+            "Skip all detected files without asking",
+            "Turns the confirmation dialog back on when unchecked",
         )
-        form.addRow("", self.skip_all_check)
-
-        self.notify_downloadable_check = QCheckBox(
+        self.notify_downloadable_check = _check(
             "Notify me when downloadable files are found on a page"
         )
-        form.addRow("", self.notify_downloadable_check)
+        cl.addWidget(self.confirm_capture_check)
+        cl.addWidget(self.skip_all_check)
+        cl.addWidget(self.notify_downloadable_check)
 
+        quality_row = QHBoxLayout()
+        quality_row.setSpacing(8)
+        quality_row.addWidget(QLabel("Streaming quality"))
         self.streaming_quality_combo = QComboBox()
+        self.streaming_quality_combo.setFixedWidth(120)
         self.streaming_quality_combo.addItem("Best", "best")
         self.streaming_quality_combo.addItem("1080p", "1080")
         self.streaming_quality_combo.addItem("720p", "720")
         self.streaming_quality_combo.addItem("Audio only", "audio")
-        form.addRow("Streaming media quality", self.streaming_quality_combo)
+        quality_row.addWidget(self.streaming_quality_combo)
+        quality_row.addStretch(1)
+        cl.addLayout(quality_row)
 
-        form.addRow("", QLabel(""))
+        layout.addWidget(card)
 
-        torrent_label = QLabel("Torrent")
-        torrent_label.setObjectName("page_subtitle")
-        form.addRow(torrent_label)
+        # ── section: Torrents ────────────────────────────────────────────────
+        card, cl = _card("Torrents")
+        grid = QGridLayout()
+        grid.setSpacing(10)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
 
-        self.torrent_enable_dht_check = QCheckBox("Enable DHT (Distributed Hash Table)")
-        form.addRow("", self.torrent_enable_dht_check)
+        row = 0
+        grid.addWidget(QLabel("Protocol"), row, 0, 1, 2)
+        grid.addWidget(QLabel("Performance"), row, 2, 1, 2)
+        row += 1
 
-        self.torrent_enable_pex_check = QCheckBox("Enable PEX (Peer Exchange)")
-        form.addRow("", self.torrent_enable_pex_check)
+        self.torrent_enable_dht_check = _check("Enable DHT (Distributed Hash Table)")
+        self.torrent_enable_pex_check = _check("Enable PEX (Peer Exchange)")
+        self.torrent_enable_encryption_check = _check("Enable encryption")
+        grid.addWidget(self.torrent_enable_dht_check, row, 0, 1, 2)
+        grid.addWidget(QLabel("Listen port"), row, 2)
+        self.torrent_listen_port_spin = _spin(1024, 65535)
+        grid.addWidget(self.torrent_listen_port_spin, row, 3)
+        row += 1
 
-        self.torrent_enable_encryption_check = QCheckBox("Enable encryption")
-        form.addRow("", self.torrent_enable_encryption_check)
+        grid.addWidget(self.torrent_enable_pex_check, row, 0, 1, 2)
+        grid.addWidget(QLabel("Max connections"), row, 2)
+        self.torrent_max_connections_spin = _spin(10, 1000)
+        grid.addWidget(self.torrent_max_connections_spin, row, 3)
+        row += 1
 
-        self.torrent_listen_port_spin = QSpinBox()
-        self.torrent_listen_port_spin.setRange(1024, 65535)
-        form.addRow("Listen port", self.torrent_listen_port_spin)
+        grid.addWidget(self.torrent_enable_encryption_check, row, 0, 1, 2)
+        grid.addWidget(QLabel("Max upload slots"), row, 2)
+        self.torrent_max_uploads_spin = _spin(1, 100)
+        grid.addWidget(self.torrent_max_uploads_spin, row, 3)
+        row += 1
 
-        self.torrent_max_connections_spin = QSpinBox()
-        self.torrent_max_connections_spin.setRange(10, 1000)
-        form.addRow("Max connections", self.torrent_max_connections_spin)
-
-        self.torrent_max_uploads_spin = QSpinBox()
-        self.torrent_max_uploads_spin.setRange(1, 100)
-        form.addRow("Max upload slots", self.torrent_max_uploads_spin)
-
-        self.torrent_max_active_torrents_spin = QSpinBox()
-        self.torrent_max_active_torrents_spin.setRange(1, 100)
+        grid.addWidget(QLabel("Queue"), row, 0, 1, 2)
+        grid.addWidget(QLabel("Active torrents"), row, 2)
+        self.torrent_max_active_torrents_spin = _spin(1, 100)
         self.torrent_max_active_torrents_spin.setToolTip(
-            "How many unfinished torrents may hold a place in the torrent queue."
+            "How many unfinished torrents may hold a place in the queue"
         )
-        form.addRow("Maximum number of active torrents", self.torrent_max_active_torrents_spin)
+        grid.addWidget(self.torrent_max_active_torrents_spin, row, 3)
+        row += 1
 
-        self.torrent_max_active_downloads_spin = QSpinBox()
-        self.torrent_max_active_downloads_spin.setRange(1, 100)
+        self.torrent_default_sequential_check = _check("Sequential download")
+        self.torrent_auto_seed_check = _check("Auto-seed after completion")
+        grid.addWidget(self.torrent_default_sequential_check, row, 0, 1, 2)
+        grid.addWidget(QLabel("Active downloads"), row, 2)
+        self.torrent_max_active_downloads_spin = _spin(1, 100)
         self.torrent_max_active_downloads_spin.setToolTip(
-            "How many torrents may download at the same time; the rest wait in queue."
+            "How many torrents may download at the same time; the rest wait in queue"
         )
-        form.addRow("Maximum number of active downloads", self.torrent_max_active_downloads_spin)
+        grid.addWidget(self.torrent_max_active_downloads_spin, row, 3)
+        row += 1
 
-        self.torrent_default_sequential_check = QCheckBox("Download sequentially by default")
-        form.addRow("", self.torrent_default_sequential_check)
+        grid.addWidget(self.torrent_auto_seed_check, row, 0, 1, 2)
+        row += 1
 
-        self.torrent_auto_seed_check = QCheckBox("Auto-seed after download completes")
-        form.addRow("", self.torrent_auto_seed_check)
+        # ── torrent integration sub-row ──────────────────────────────────────
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setFrameShadow(QFrame.Sunken)
+        cl.addLayout(grid)
+        cl.addWidget(sep)
 
-        self.torrent_file_association_check = QCheckBox(
-            "Register MagnetoClip to open .torrent files on Windows"
+        self.torrent_file_association_check = _check(
+            "Register to open .torrent files on Windows"
         )
-        form.addRow("", self.torrent_file_association_check)
-
-        self.torrent_magnet_protocol_check = QCheckBox(
-            "Register MagnetoClip to handle magnet: links on Windows"
+        self.torrent_magnet_protocol_check = _check(
+            "Register to handle magnet: links on Windows"
         )
-        form.addRow("", self.torrent_magnet_protocol_check)
 
-        torrent_dir_row = QHBoxLayout()
         self.torrent_save_dir_edit = QLineEdit()
-        torrent_dir_row.addWidget(self.torrent_save_dir_edit, 1)
-        torrent_browse = QPushButton("Browse\u2026")
-        torrent_browse.clicked.connect(self._browse_torrent_dir)
-        torrent_dir_row.addWidget(torrent_browse)
-        form.addRow("Default torrent save folder", torrent_dir_row)
+        self.torrent_save_dir_edit.setPlaceholderText("Default torrent save folder")
+        dir_row = QHBoxLayout()
+        dir_row.setSpacing(6)
+        dir_row.addWidget(QLabel("Save folder"))
+        dir_row.addWidget(self.torrent_save_dir_edit, 1)
+        dir_row.addWidget(_browse_btn(self._browse_torrent_dir))
+        assoc_row = QHBoxLayout()
+        assoc_row.setSpacing(20)
+        assoc_row.addWidget(self.torrent_file_association_check)
+        assoc_row.addWidget(self.torrent_magnet_protocol_check)
+        assoc_row.addStretch(1)
+        cl.addLayout(assoc_row)
+        cl.addLayout(dir_row)
 
-        proxy_label = QLabel("Proxy")
-        proxy_label.setObjectName("page_subtitle")
-        layout.addWidget(proxy_label)
+        layout.addWidget(card)
 
-        proxy_form = QFormLayout()
-        proxy_form.setSpacing(12)
+        # ── section: Network (Proxy) ─────────────────────────────────────────
+        card, cl = _card("Network")
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addWidget(QLabel("Default proxy"))
         self.proxy_combo = QComboBox()
-        proxy_form.addRow("Default proxy for new downloads", self.proxy_combo)
-        manage_proxy_button = QPushButton("Manage proxy profiles…")
+        self.proxy_combo.setMinimumWidth(160)
+        row.addWidget(self.proxy_combo, 1)
+        manage_proxy_button = QPushButton("Manage profiles…")
         manage_proxy_button.clicked.connect(self._manage_proxies)
-        proxy_form.addRow("", manage_proxy_button)
-        layout.addLayout(proxy_form)
+        row.addWidget(manage_proxy_button)
+        cl.addLayout(row)
+        layout.addWidget(card)
 
-        updates_label = QLabel("Updates")
-        updates_label.setObjectName("page_subtitle")
-        layout.addWidget(updates_label)
+        # ── section: Updates ─────────────────────────────────────────────────
+        card, cl = _card("Updates")
+        self.updates_check_enabled = _check("Check for updates automatically")
+        cl.addWidget(self.updates_check_enabled)
 
-        updates_form = QFormLayout()
-        updates_form.setSpacing(12)
-
-        self.updates_check_enabled = QCheckBox("Check for updates automatically")
-        updates_form.addRow("", self.updates_check_enabled)
-
+        endpoint_row = QHBoxLayout()
+        endpoint_row.setSpacing(8)
+        endpoint_row.addWidget(QLabel("Endpoint"))
         self.updates_endpoint_edit = QLineEdit()
-        updates_form.addRow("Update endpoint", self.updates_endpoint_edit)
+        endpoint_row.addWidget(self.updates_endpoint_edit, 1)
+        cl.addLayout(endpoint_row)
 
-        self.updates_status_label = QLabel("")
-        self.updates_status_label.setObjectName("updates_status")
-        updates_form.addRow("Last checked", self.updates_status_label)
-
+        status_grid = QGridLayout()
+        status_grid.setSpacing(12)
+        status_grid.addWidget(QLabel("Last checked"), 0, 0)
+        self.updates_status_label = QLabel("Never")
+        self.updates_status_label.setObjectName("card_caption")
+        status_grid.addWidget(self.updates_status_label, 0, 1)
+        status_grid.addWidget(QLabel("Available version"), 0, 2)
         self.updates_version_label = QLabel("")
-        self.updates_version_label.setObjectName("updates_version")
-        updates_form.addRow("Available version", self.updates_version_label)
+        self.updates_version_label.setObjectName("card_caption")
+        status_grid.addWidget(self.updates_version_label, 0, 3)
+        cl.addLayout(status_grid)
 
         self.updates_progress = QProgressBar()
         self.updates_progress.setVisible(False)
-        updates_form.addRow("Download progress", self.updates_progress)
-
+        cl.addWidget(self.updates_progress)
         self.updates_progress_label = QLabel("")
+        self.updates_progress_label.setObjectName("card_caption")
         self.updates_progress_label.setVisible(False)
-        updates_form.addRow("", self.updates_progress_label)
+        cl.addWidget(self.updates_progress_label)
 
-        buttons_row = QHBoxLayout()
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
         self.check_updates_button = QPushButton("Check Now")
         self.check_updates_button.clicked.connect(self._check_for_updates)
-        buttons_row.addWidget(self.check_updates_button)
-
+        btn_row.addWidget(self.check_updates_button)
         self.download_updates_button = QPushButton("Download")
         self.download_updates_button.setVisible(False)
         self.download_updates_button.clicked.connect(self._download_update)
-        buttons_row.addWidget(self.download_updates_button)
-
+        btn_row.addWidget(self.download_updates_button)
         self.install_updates_button = QPushButton("Install")
         self.install_updates_button.setVisible(False)
         self.install_updates_button.clicked.connect(self._install_update)
-        buttons_row.addWidget(self.install_updates_button)
+        btn_row.addWidget(self.install_updates_button)
+        btn_row.addStretch(1)
+        cl.addLayout(btn_row)
+        layout.addWidget(card)
 
-        buttons_row.addStretch(1)
-        updates_form.addRow("", buttons_row)
-        layout.addLayout(updates_form)
-
-        remote_label = QLabel("Remote Control")
-        remote_label.setObjectName("page_subtitle")
-        layout.addWidget(remote_label)
-
-        remote_form = QFormLayout()
-        remote_form.setSpacing(12)
-
-        self.remote_enabled_check = QCheckBox(
-            "Enable remote dashboard (local network only)"
-        )
-        self.remote_enabled_check.setToolTip(
+        # ── section: Remote Control ──────────────────────────────────────────
+        card, cl = _card("Remote Control")
+        self.remote_enabled_check = _check(
+            "Enable remote dashboard (local network only)",
             "Control MagnetoClip from your phone or another browser on the "
-            "same Wi-Fi/LAN. The dashboard never exposes your filesystem."
+            "same Wi-Fi/LAN. The dashboard never exposes your filesystem.",
         )
-        remote_form.addRow("", self.remote_enabled_check)
+        cl.addWidget(self.remote_enabled_check)
 
-        self.remote_port_spin = QSpinBox()
-        self.remote_port_spin.setRange(1024, 65535)
-        remote_form.addRow("Dashboard port", self.remote_port_spin)
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addWidget(QLabel("Dashboard port"))
+        self.remote_port_spin = _spin(1024, 65535)
+        self.remote_port_spin.setFixedWidth(90)
+        row.addWidget(self.remote_port_spin)
+        row.addSpacing(16)
+        self.remote_status_label = QLabel("Off")
+        self.remote_status_label.setObjectName("card_caption")
+        row.addWidget(self.remote_status_label)
+        row.addStretch(1)
+        cl.addLayout(row)
 
-        remote_buttons_row = QHBoxLayout()
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
         self.remote_qr_button = QPushButton("Show QR…")
         self.remote_qr_button.clicked.connect(self._show_remote_pairing)
-        remote_buttons_row.addWidget(self.remote_qr_button)
-
+        btn_row.addWidget(self.remote_qr_button)
         self.remote_regen_button = QPushButton("Regenerate Token")
         self.remote_regen_button.clicked.connect(self._regenerate_remote_token)
-        remote_buttons_row.addWidget(self.remote_regen_button)
-        remote_buttons_row.addStretch(1)
-        remote_form.addRow("", remote_buttons_row)
+        btn_row.addWidget(self.remote_regen_button)
+        btn_row.addStretch(1)
+        cl.addLayout(btn_row)
+        layout.addWidget(card)
 
-        self.remote_status_label = QLabel("Off")
-        self.remote_status_label.setObjectName("updates_status")
-        remote_form.addRow("Server status", self.remote_status_label)
-        layout.addLayout(remote_form)
-
-        license_label = QLabel("License")
-        license_label.setObjectName("page_subtitle")
-        layout.addWidget(license_label)
-
-        license_form = QFormLayout()
-        license_form.setSpacing(12)
-
+        # ── section: License ─────────────────────────────────────────────────
+        card, cl = _card("License")
+        row = QHBoxLayout()
+        row.setSpacing(24)
+        lbl_serial = QLabel("Serial")
+        lbl_serial.setObjectName("card_caption")
         self.license_serial_label = QLabel("Not activated")
-        self.license_serial_label.setObjectName("updates_status")
-        license_form.addRow("Serial", self.license_serial_label)
-
+        self.license_serial_label.setObjectName("card_caption")
+        lbl_last = QLabel("Last verified")
+        lbl_last.setObjectName("card_caption")
         self.license_validated_label = QLabel("Never")
-        self.license_validated_label.setObjectName("updates_status")
-        license_form.addRow("Last verified", self.license_validated_label)
-
-        license_buttons_row = QHBoxLayout()
+        self.license_validated_label.setObjectName("card_caption")
+        pair1 = QVBoxLayout()
+        pair1.addWidget(lbl_serial)
+        pair1.addWidget(self.license_serial_label)
+        pair2 = QVBoxLayout()
+        pair2.addWidget(lbl_last)
+        pair2.addWidget(self.license_validated_label)
+        row.addLayout(pair1, 2)
+        row.addLayout(pair2, 2)
+        row.addStretch(1)
         self.license_deactivate_button = QPushButton("Deactivate this PC…")
         self.license_deactivate_button.clicked.connect(self._deactivate_license)
-        license_buttons_row.addWidget(self.license_deactivate_button)
-        license_buttons_row.addStretch(1)
-        license_form.addRow("", license_buttons_row)
-        layout.addLayout(license_form)
+        row.addWidget(self.license_deactivate_button)
+        cl.addLayout(row)
+        layout.addWidget(card)
 
-        self._pending_update_info = None
-        self._downloaded_installer = None
-        layout.addLayout(form)
-
+        # ── save row ─────────────────────────────────────────────────────────
         save_row = QHBoxLayout()
+        save_row.setContentsMargins(0, 8, 0, 0)
         self.save_button = AccentButton("Save Settings")
         self.save_button.clicked.connect(self.save)
         save_row.addWidget(self.save_button)
@@ -353,12 +459,17 @@ class SettingsPage(Page):
         layout.addLayout(save_row)
         layout.addStretch(1)
 
+        # ── timers / state ───────────────────────────────────────────────────
         self._feedback_timer = QTimer(self)
         self._feedback_timer.setSingleShot(True)
         self._feedback_timer.setInterval(2500)
         self._feedback_timer.timeout.connect(self.save_feedback.hide)
+        self._pending_update_info = None
+        self._downloaded_installer = None
 
         self._load_values()
+
+    # ── value load / persist ─────────────────────────────────────────────────
 
     def _load_values(self) -> None:
         s = self.context.settings
@@ -373,6 +484,7 @@ class SettingsPage(Page):
         self.startup_check.setChecked(bool(s.get("general.startup", True)))
         self.auto_categorize_check.setChecked(bool(s.get("downloads.auto_categorize", True)))
         self.confirm_capture_check.setChecked(bool(s.get("browser.confirm_capture", True)))
+
         from magnetoclip.browser.skip import skip_all_active
 
         self.skip_all_check.setChecked(skip_all_active(self.context))
@@ -405,10 +517,7 @@ class SettingsPage(Page):
         self.updates_check_enabled.setChecked(bool(s.get("updates.check_enabled", True)))
         self.updates_endpoint_edit.setText(str(s.get("updates.endpoint", "")))
         last_checked = str(s.get("updates.last_checked", ""))
-        if last_checked:
-            self.updates_status_label.setText(last_checked)
-        else:
-            self.updates_status_label.setText("Never")
+        self.updates_status_label.setText(last_checked or "Never")
 
         self.remote_enabled_check.setChecked(bool(s.get("remote.enabled", False)))
         self.remote_port_spin.setValue(int(s.get("remote.port", 8477)))
@@ -431,48 +540,7 @@ class SettingsPage(Page):
         )
         self.license_deactivate_button.setEnabled(bool(serial))
 
-    def _deactivate_license(self) -> None:
-        from magnetoclip.services.licensing.state import (
-            build_client_from_settings,
-            read_serial,
-        )
-        from magnetoclip.ui.dialogs.activation import _LicenseWorker
-
-        serial = read_serial()
-        if not serial:
-            return
-        answer = QMessageBox.question(
-            self,
-            "Deactivate License",
-            "Deactivate MagnetoClip on this PC?\n\nThe serial key will be freed "
-            "so it can be used on another computer.",
-        )
-        if answer != QMessageBox.Yes:
-            return
-        client = build_client_from_settings(self.context.settings)
-        self._license_worker = _LicenseWorker(client, "deactivate", serial)
-        self._license_worker.done.connect(
-            lambda data, exc: self._on_license_deactivated(serial, exc)
-        )
-        self._license_worker.start()
-
-    def _on_license_deactivated(self, serial: str, exc: Exception | None) -> None:
-        from magnetoclip.services.licensing.state import clear_serial
-
-        if isinstance(exc, Exception):
-            QMessageBox.warning(
-                self,
-                "Deactivate License",
-                f"Could not deactivate:\n{exc}\n\nThe key was NOT removed from this PC.",
-            )
-            return
-        clear_serial()
-        self._refresh_license_labels()
-        QMessageBox.information(
-            self,
-            "Deactivate License",
-            "This PC has been deactivated.\nMagnetoClip will ask for a serial key on next launch.",
-        )
+    # ── actions ──────────────────────────────────────────────────────────────
 
     def _browse_directory(self) -> None:
         directory = QFileDialog.getExistingDirectory(self, "Default download folder")
@@ -501,8 +569,9 @@ class SettingsPage(Page):
         dialog.exec()
         self._load_proxy_combo()
 
+    # ── updates ──────────────────────────────────────────────────────────────
+
     def _check_for_updates(self) -> None:
-        """Check for updates using a background thread."""
         endpoint = self.updates_endpoint_edit.text().strip()
         if not endpoint:
             QMessageBox.warning(self, "Check for Updates", "Please enter an update endpoint URL.")
@@ -520,7 +589,6 @@ class SettingsPage(Page):
         self._update_worker.start()
 
     def _on_update_check_done(self, result) -> None:
-        """Handle the result from the update check worker thread."""
         from datetime import UTC, datetime
 
         try:
@@ -559,7 +627,6 @@ class SettingsPage(Page):
             self.check_updates_button.setText("Check Now")
 
     def _download_update(self) -> None:
-        """Download the update using a background thread."""
         if not self._pending_update_info:
             return
 
@@ -577,7 +644,6 @@ class SettingsPage(Page):
         self._download_worker.start()
 
     def _on_download_progress(self, progress) -> None:
-        """Handle progress updates from the download worker."""
         self.updates_progress.setValue(int(progress.percent))
         if progress.total_bytes > 0:
             downloaded_mb = progress.bytes_downloaded / (1024 * 1024)
@@ -587,7 +653,6 @@ class SettingsPage(Page):
             )
 
     def _on_download_done(self, result) -> None:
-        """Handle the result from the download worker thread."""
         try:
             if result:
                 self._downloaded_installer = str(result)
@@ -610,7 +675,6 @@ class SettingsPage(Page):
             self.updates_progress.setVisible(False)
 
     def _install_update(self) -> None:
-        """Launch the update installer."""
         if not self._downloaded_installer:
             return
 
@@ -647,12 +711,10 @@ class SettingsPage(Page):
                 # context.shutdown() runs, the single-instance lock is
                 # released, and only then does the swap batch proceed.
                 # NOTE: AppContext has no `app` attribute — calling
-                # self.context.app.quit() here used to raise AttributeError
-                # after the batch was launched, leaving it waiting forever.
+                # self.context.app.quit() used to raise AttributeError after
+                # the batch was launched, leaving it waiting forever.
                 window = self.window()
                 QTimer.singleShot(300, window.close)
-
-                QTimer.singleShot(300, _close_for_update)
             else:
                 QMessageBox.warning(
                     self,
@@ -660,6 +722,8 @@ class SettingsPage(Page):
                     "Failed to launch the installer. Please run it manually:\n"
                     f"{installer_path}",
                 )
+
+    # ── remote control ───────────────────────────────────────────────────────
 
     def _refresh_remote_status(self) -> None:
         server = getattr(self.context, "remote", None)
@@ -685,7 +749,6 @@ class SettingsPage(Page):
         RemotePairDialog(server, parent=self).exec()
 
     def _regenerate_remote_token(self) -> None:
-        """Generate a fresh pairing token; revokes paired devices instantly."""
         import secrets as _secrets
 
         from magnetoclip.database.repositories import SettingsStore
@@ -702,11 +765,6 @@ class SettingsPage(Page):
         )
 
     def _schedule_remote(self, coro, done=None) -> None:
-        """Schedule server work on the loop, tolerating re-entrancy limits.
-
-        qasync (Python 3.13) refuses to step a new task while another task
-        is mid-step; closing the coroutine keeps that edge non-fatal.
-        """
         import asyncio
 
         try:
@@ -718,7 +776,6 @@ class SettingsPage(Page):
             task.add_done_callback(lambda _: done())
 
     def _apply_remote_changes(self) -> None:
-        """Start/stop/restart the live remote server to match saved settings."""
         import asyncio
 
         from ...services.remote.server import RemoteServer
@@ -766,6 +823,53 @@ class SettingsPage(Page):
                 server.start(), done=self._refresh_remote_status
             )
         self._refresh_remote_status()
+
+    # ── license ──────────────────────────────────────────────────────────────
+
+    def _deactivate_license(self) -> None:
+        from magnetoclip.services.licensing.state import (
+            build_client_from_settings,
+            read_serial,
+        )
+        from magnetoclip.ui.dialogs.activation import _LicenseWorker
+
+        serial = read_serial()
+        if not serial:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Deactivate License",
+            "Deactivate MagnetoClip on this PC?\n\nThe serial key will be freed "
+            "so it can be used on another computer.",
+        )
+        if answer != QMessageBox.Yes:
+            return
+        client = build_client_from_settings(self.context.settings)
+        self._license_worker = _LicenseWorker(client, "deactivate", serial)
+        self._license_worker.done.connect(
+            lambda data, exc: self._on_license_deactivated(serial, exc)
+        )
+        self._license_worker.start()
+
+    def _on_license_deactivated(self, serial: str, exc: Exception | None) -> None:
+        from magnetoclip.services.licensing.state import clear_serial
+
+        if isinstance(exc, Exception):
+            QMessageBox.warning(
+                self,
+                "Deactivate License",
+                f"Could not deactivate:\n{exc}\n\nThe key was NOT removed from this PC.",
+            )
+            return
+        clear_serial()
+        self._refresh_license_labels()
+        QMessageBox.information(
+            self,
+            "Deactivate License",
+            "This PC has been deactivated.\nMagnetoClip will ask for a serial key on next launch.",
+        )
+
+    # ── save ─────────────────────────────────────────────────────────────────
 
     def save(self) -> None:
         from magnetoclip.database.repositories import SettingsStore

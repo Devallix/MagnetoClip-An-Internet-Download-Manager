@@ -1,10 +1,10 @@
 {
-    "version": "0.2.5",
-    "download_url": "https://github.com/Devallix/MagnetoClip-An-Internet-Download-Manager/raw/refs/heads/main/releases/MagnetoClip-0.2.5.zip",
-    "release_notes": "Upgraded to Version 0.2.5 (License activation is now live: the app verifies serial keys against the production license server with Ed25519-signed responses; one PC per key with self-service deactivation from Settings; critical update installer fix: the app now closes cleanly via the main window shutdown path instead of raising AttributeError, the swap batch retries against transient file locks and force-kills if the wait loop times out; full user documentation added at docs/USER_GUIDE.md)",
+    "version": "0.2.6",
+    "download_url": "https://github.com/Devallix/MagnetoClip-An-Internet-Download-Manager/raw/refs/heads/main/releases/MagnetoClip-0.2.6.zip",
+    "release_notes": "Upgraded to Version 0.2.6 (UI overhaul: card-based Settings page with logical grouping by section; Overview dashboard redesigned with color-coded stat cards, recent activity section, and quick-action buttons; menu bar added with Help menu providing in-app User Guide and EULA viewers; improved window sizing and button layout; scrollable overview page)",
     "release_date": "2026-08-25",
     "min_version": "0.1.0",
-    "size_bytes": 78584164,
-    "filename": "MagnetoClip-0.2.5.zip",
-    "sha256": "3feddc20e674a9faa9c9ac2fb404e42ce9925b06d989582a1419875ce29b0415"
+    "size_bytes": 78601885,
+    "filename": "MagnetoClip-0.2.6.zip",
+    "sha256": "aa3035d78c2c02217fde33ef8872a301fed8aa50b3f220f456c78fb217636d24"
 }

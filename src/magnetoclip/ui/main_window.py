@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QScrollArea,
     QStackedWidget,
     QStatusBar,
@@ -68,8 +69,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"MagnetoClip {__version__}")
         self.setWindowIcon(app_icon())
         self._fitting = True
-        self.resize(1100, 640)
-        self.setMinimumSize(720, 580)
+        self.resize(1100, 740)
+        self.setMinimumSize(720, 640)
         self._fit_to_work_area()
         self._speeds: dict[int, float] = {}
         self._active = 0
@@ -83,6 +84,7 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
+        self._build_menu_bar()
         root.addWidget(self._build_toolbar())
 
         body = QHBoxLayout()
@@ -149,6 +151,27 @@ class MainWindow(QMainWindow):
         self._refresh_stats()
 
     # ----- construction -----
+
+    def _build_menu_bar(self) -> None:
+        menu_bar = self.menuBar()
+        menu_bar.setNativeMenuBar(False)
+
+        help_menu = menu_bar.addMenu("&Help")
+
+        doc_action = help_menu.addAction("Documentation")
+        doc_action.triggered.connect(
+            lambda: self._show_markdown("USER_GUIDE.md", "MagnetoClip — User Guide")
+        )
+
+        eula_action = help_menu.addAction("License Agreement")
+        eula_action.triggered.connect(
+            lambda: self._show_markdown("EULA.md", "MagnetoClip — License Agreement")
+        )
+
+    def _show_markdown(self, filename: str, title: str) -> None:
+        from .dialogs.markdown_viewer import MarkdownViewerDialog
+
+        MarkdownViewerDialog(filename, title, parent=self).exec()
 
     def _build_toolbar(self) -> QFrame:
         toolbar = QFrame()
