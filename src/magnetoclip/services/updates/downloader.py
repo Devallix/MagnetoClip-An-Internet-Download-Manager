@@ -157,8 +157,14 @@ class UpdateDownloader:
         """Write and launch a ``.bat`` that swaps old ↔ new files after the app exits."""
         import subprocess
 
-        bat_path = staging_dir / "_swap.bat"
+        # The batch must NOT live inside staging_dir: cmd keeps an open handle
+        # to the executing .bat, so a later ``rmdir`` of staging would fail and
+        # leave garbage behind. A separate temp dir also lets xcopy mirror the
+        # staged update 1:1.
+        bat_dir = Path(tempfile.mkdtemp(prefix="magnetoclip_swap_"))
+        bat_path = bat_dir / "_swap.bat"
         exe_name = "MagnetoClip.exe"
+        log_file = bat_dir / "update.log"
         # Identify *this* process specifically. Waiting on the image name is
         # not enough: the browser-integration native host runs the very same
         # MagnetoClip.exe, so a name-based loop spins forever while any host
@@ -166,42 +172,71 @@ class UpdateDownloader:
         main_pid = os.getpid()
 
         # The batch script:
-        #   1. Waits until the main app process (by PID) has exited.
+        #   1. Waits until the main app process (by PID) exits — at most ~90 s,
+        #      then force-kills that PID so the swap can never hang forever.
         #   2. Force-stops leftover helper instances (browser-host), which
         #      would otherwise keep the executable locked.
-        #   3. Removes old _internal/ and the old exe.
-        #   4. Copies fresh files from staging into the install dir.
-        #   5. Cleans up the staging directory and itself, then restarts.
+        #   3. Removes old _internal/ and the old exe, retrying briefly —
+        #     antivirus/indexer handles can hold locks for a few seconds.
+        #   4. Copies fresh files from staging into the install dir, verifying
+        #      xcopy succeeded before continuing.
+        #   5. Cleans up the staging directory and restarts.
         # ``ping`` is used as the sleep because ``timeout`` misbehaves without
-        # an interactive console.
+        # an interactive console; each ping -n 2 waits roughly one second.
         bat_content = (
             "@echo off\r\n"
-            "REM --- wait for the main MagnetoClip process to exit ---\r\n"
+            "chcp 65001 >NUL\r\n"
+            f'echo [%DATE% %TIME%] update swap started >"{log_file}"\r\n'
+            "\r\n"
+            "REM --- wait for the main MagnetoClip process to exit (max ~90s) ---\r\n"
+            "set /a tries=0\r\n"
             ":wait_loop\r\n"
-            "ping -n 2 127.0.0.1 >NUL\r\n"
             f'tasklist /FI "PID eq {main_pid}" 2>NUL | find /I "{main_pid}" >NUL\r\n'
-            "if %ERRORLEVEL% == 0 goto wait_loop\r\n"
+            "if %ERRORLEVEL% NEQ 0 goto wait_done\r\n"
+            "set /a tries+=1\r\n"
+            f"if %tries% GEQ 90 goto force_kill\r\n"
+            "ping -n 2 127.0.0.1 >NUL\r\n"
+            "goto wait_loop\r\n"
+            ":force_kill\r\n"
+            f'echo main PID {main_pid} still alive after 90s - force killing >>"{log_file}"\r\n'
+            f"taskkill /f /pid {main_pid} >NUL 2>&1\r\n"
+            "ping -n 3 127.0.0.1 >NUL\r\n"
+            ":wait_done\r\n"
             "\r\n"
             "REM --- stop leftover helper instances (browser-host) ---\r\n"
             f'taskkill /f /im {exe_name} >NUL 2>&1\r\n'
             "ping -n 2 127.0.0.1 >NUL\r\n"
             "\r\n"
-            "REM --- remove old files ---\r\n"
-            f'rmdir /s /q "{install_dir}\\_internal"\r\n'
+            "REM --- remove old files, then copy new ones (with retries) ---\r\n"
+            "set /a copy_tries=0\r\n"
+            ":swap_loop\r\n"
+            f'rmdir /s /q "{install_dir}\\_internal" >NUL 2>&1\r\n'
             f'del /f /q "{install_dir}\\{exe_name}" >NUL 2>&1\r\n'
-            "\r\n"
-            "REM --- copy new files ---\r\n"
-            f'xcopy /i /s /e /y /q "{staging_dir}\\*" "{install_dir}\\" >NUL\r\n'
-            f'del /f /q "{install_dir}\\_swap.bat" >NUL 2>&1\r\n'
+            f'xcopy /i /s /e /y /q "{staging_dir}\\*" "{install_dir}\\" >NUL 2>&1\r\n'
+            "if %ERRORLEVEL% EQU 0 goto swap_ok\r\n"
+            "set /a copy_tries+=1\r\n"
+            f'echo swap attempt %copy_tries% failed >>"{log_file}"\r\n'
+            "if %copy_tries% GEQ 10 goto swap_fail\r\n"
+            "ping -n 2 127.0.0.1 >NUL\r\n"
+            "goto swap_loop\r\n"
+            ":swap_fail\r\n"
+            f'echo FATAL: swap failed after 10 attempts >>"{log_file}"\r\n'
+            "exit /b 1\r\n"
+            ":swap_ok\r\n"
+            f'echo swap completed >>"{log_file}"\r\n'
             "\r\n"
             "REM --- cleanup ---\r\n"
-            f'rmdir /s /q "{staging_dir}"\r\n'
+            f'rmdir /s /q "{staging_dir}" >NUL 2>&1\r\n'
+            f'del /f /q "{log_file}" >NUL 2>&1\r\n'
             "\r\n"
             "REM --- restart ---\r\n"
-            f'start "" "{install_dir}\\{exe_name}"\r\n'
+            'start "" "' + str(install_dir / exe_name) + '"\r\n'
         )
 
-        bat_path.write_text(bat_content, encoding="ascii")
+        try:
+            bat_path.write_text(bat_content, encoding="utf-8")
+        except UnicodeEncodeError:
+            bat_path.write_text(bat_content, encoding="ascii", errors="replace")
         log.info("update_batch_created", path=str(bat_path))
 
         subprocess.Popen(

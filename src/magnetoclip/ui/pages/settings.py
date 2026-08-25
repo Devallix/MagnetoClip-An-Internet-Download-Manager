@@ -636,11 +636,23 @@ class SettingsPage(Page):
         )
 
         if reply == QMessageBox.Yes:
+            from PySide6.QtCore import QTimer
+
             from magnetoclip.services.updates import UpdateDownloader
 
             downloader = UpdateDownloader()
             if downloader.install(installer_path):
-                self.context.app.quit()
+                # Closing the main window (not QApplication.quit()) drives the
+                # graceful shutdown path in app.main: the run loop exits,
+                # context.shutdown() runs, the single-instance lock is
+                # released, and only then does the swap batch proceed.
+                # NOTE: AppContext has no `app` attribute — calling
+                # self.context.app.quit() here used to raise AttributeError
+                # after the batch was launched, leaving it waiting forever.
+                window = self.window()
+                QTimer.singleShot(300, window.close)
+
+                QTimer.singleShot(300, _close_for_update)
             else:
                 QMessageBox.warning(
                     self,
