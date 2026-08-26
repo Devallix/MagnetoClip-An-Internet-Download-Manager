@@ -443,6 +443,11 @@ class SettingsPage(Page):
         self.license_deactivate_button.clicked.connect(self._deactivate_license)
         row.addWidget(self.license_deactivate_button)
         cl.addLayout(row)
+
+        self.license_trial_label = QLabel("")
+        self.license_trial_label.setObjectName("card_caption")
+        cl.addWidget(self.license_trial_label)
+
         layout.addWidget(card)
 
         # ── save row ─────────────────────────────────────────────────────────
@@ -530,6 +535,10 @@ class SettingsPage(Page):
             last_validated_text,
             read_serial,
         )
+        from magnetoclip.services.licensing.trial import (
+            is_trial_active,
+            trial_days_remaining,
+        )
 
         serial = read_serial()
         self.license_serial_label.setText(
@@ -539,6 +548,15 @@ class SettingsPage(Page):
             last_validated_text(self.context.settings)
         )
         self.license_deactivate_button.setEnabled(bool(serial))
+
+        if is_trial_active(self.context.settings):
+            days = trial_days_remaining(self.context.settings)
+            self.license_trial_label.setText(
+                f"Trial active — {days} day{'s' if days != 1 else ''} remaining"
+            )
+            self.license_trial_label.show()
+        else:
+            self.license_trial_label.hide()
 
     # ── actions ──────────────────────────────────────────────────────────────
 

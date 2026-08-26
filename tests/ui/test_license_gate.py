@@ -1,5 +1,7 @@
 """Startup license gate: dialog behavior without touching the network."""
 
+from datetime import UTC, datetime
+
 import pytest
 
 from magnetoclip.app.lifecycle import build_context
@@ -16,6 +18,21 @@ def test_gate_required_depends_on_endpoint(context, monkeypatch):
     context.settings.set("license.endpoint", "http://x")
     assert gate_required(context.settings) is False
     monkeypatch.delenv("MCLIP_LICENSE_OFF")
+    assert gate_required(context.settings) is True
+
+
+def test_gate_required_skipped_during_trial(context):
+    context.settings.set("license.endpoint", "http://x")
+    context.settings.set("trial.first_launch", datetime.now(UTC).isoformat())
+    assert gate_required(context.settings) is False
+
+
+def test_gate_required_enforced_after_trial_expired(context):
+    from datetime import timedelta
+
+    context.settings.set("license.endpoint", "http://x")
+    launched = datetime.now(UTC) - timedelta(days=10)
+    context.settings.set("trial.first_launch", launched.isoformat())
     assert gate_required(context.settings) is True
 
 

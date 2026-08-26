@@ -214,17 +214,29 @@ def canonical_input(text: str) -> str:
 
 
 def gate_required(settings) -> bool:
-    """Licensing is enforced only when a server endpoint is configured."""
+    """Licensing is enforced only when a server endpoint is configured
+    AND the 7-day trial has expired."""
     if os.environ.get("MCLIP_LICENSE_OFF") == "1":
         return False
     endpoint = str(settings.get("license.endpoint", "") or "").strip()
-    return bool(endpoint)
+    if not endpoint:
+        return False
+    from magnetoclip.services.licensing.trial import is_trial_active
+
+    if is_trial_active(settings):
+        return False
+    return True
 
 
 def run_activation_gate(context, parent=None) -> bool:
     """Open the modal gate; True means the user may proceed."""
     if not gate_required(context.settings):
-        log.info("license_gate_skipped_no_endpoint")
+        from magnetoclip.services.licensing.trial import is_trial_active
+
+        if is_trial_active(context.settings):
+            log.info("license_gate_skipped_trial_active")
+        else:
+            log.info("license_gate_skipped_no_endpoint")
         return True
     dialog = ActivationDialog(context, parent=parent)
     result = dialog.exec()

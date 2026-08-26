@@ -81,8 +81,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     # License gate: verify online before anything else runs (v1 policy).
+    # A 7-day trial is granted on first launch; the gate is skipped while
+    # the trial is active.
+    from magnetoclip.services.licensing.trial import ensure_trial_started
     from magnetoclip.ui.dialogs.activation import run_activation_gate
 
+    ensure_trial_started(context.settings)
     if not run_activation_gate(context):
         log.info("license_gate_aborted")
         lock.unlock()

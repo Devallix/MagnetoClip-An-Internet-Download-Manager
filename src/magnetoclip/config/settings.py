@@ -73,6 +73,9 @@ DEFAULTS: dict[str, Any] = {
     "license.endpoint": "https://magnetocliplicenseadmin.pythonanywhere.com/",
     "license.public_key": "GoQTJxkad4rZkdqcU22fEAmaBKp7ml99lNguTcITCig=",  # Ed25519 pin; embedded constant used when empty
     "license.last_validated": "",
+    # Trial period (first-launch grace before activation is required).
+    "trial.first_launch": "",   # ISO timestamp; set once on first launch
+    "trial.days": 7,            # number of free trial days
 }
 
 

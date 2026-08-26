@@ -122,6 +122,13 @@ class MainWindow(QMainWindow):
         status.addPermanentWidget(self.count_label)
         self.speed_label = QLabel("0 B/s")
         status.addPermanentWidget(self.speed_label)
+
+        self.trial_label = QLabel("")
+        self.trial_label.setObjectName("muted")
+        self.trial_label.hide()
+        status.addPermanentWidget(self.trial_label)
+        self._refresh_trial_label()
+
         self.version_label = QLabel(f"v{__version__}")
         self.version_label.setObjectName("muted")
         status.addPermanentWidget(self.version_label)
@@ -531,6 +538,21 @@ class MainWindow(QMainWindow):
 
         if reply == QMessageBox.Yes:
             self._activate_nav("settings")
+
+    def _refresh_trial_label(self) -> None:
+        from magnetoclip.services.licensing.trial import (
+            is_trial_active,
+            trial_days_remaining,
+        )
+
+        if is_trial_active(self.context.settings):
+            days = trial_days_remaining(self.context.settings)
+            self.trial_label.setText(
+                f"Trial: {days} day{'s' if days != 1 else ''} left"
+            )
+            self.trial_label.show()
+        else:
+            self.trial_label.hide()
 
     def _refresh_stats(self) -> None:
         manager = getattr(self.context, "manager", None)

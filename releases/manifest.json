@@ -1,10 +1,10 @@
 {
-    "version": "0.2.6",
-    "download_url": "https://github.com/Devallix/MagnetoClip-An-Internet-Download-Manager/raw/refs/heads/main/releases/MagnetoClip-0.2.6.zip",
-    "release_notes": "Upgraded to Version 0.2.6 (UI overhaul: card-based Settings page with logical grouping by section; Overview dashboard redesigned with color-coded stat cards, recent activity section, and quick-action buttons; menu bar added with Help menu providing in-app User Guide and EULA viewers; improved window sizing and button layout; scrollable overview page)",
+    "version": "0.2.7",
+    "download_url": "https://github.com/Devallix/MagnetoClip-An-Internet-Download-Manager/raw/refs/heads/main/releases/MagnetoClip-0.2.7.zip",
+    "release_notes": "Upgraded to Version 0.2.7 (7-day free trial: first launch grants a no-questions-asked grace period before activation is required; trial countdown shown in status bar and Settings > License card; trial period configurable via trial.days setting)",
     "release_date": "2026-08-25",
     "min_version": "0.1.0",
-    "size_bytes": 78601885,
-    "filename": "MagnetoClip-0.2.6.zip",
-    "sha256": "aa3035d78c2c02217fde33ef8872a301fed8aa50b3f220f456c78fb217636d24"
+    "size_bytes": 78604671,
+    "filename": "MagnetoClip-0.2.7.zip",
+    "sha256": "03927c2551220900290a8d141d606014e0279cad94ed0d34a1320b77331d095c"
 }

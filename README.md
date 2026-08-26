@@ -7,7 +7,7 @@ It pairs an IDM-class multi-connection download core with a browser extension
 that detects files, media streams and torrents as you browse — then captures
 them into smart, auto-sorted categories.
 
-Current version: **0.2.6**
+Current version: **0.2.7**
 
 ## Documentation
 
