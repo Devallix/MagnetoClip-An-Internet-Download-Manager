@@ -67,3 +67,20 @@ def mark_validated(settings) -> None:
 def last_validated_text(settings) -> str:
     raw = str(settings.get("license.last_validated", "") or "")
     return raw.replace("T", " ") if raw else "Never"
+
+
+def store_machine_usage(settings, max_machines: int, machines_used: int, session_factory=None) -> None:
+    settings.set("license.max_machines", max_machines)
+    settings.set("license.machines_used", machines_used)
+    if session_factory is not None:
+        from magnetoclip.database.repositories import SettingsStore
+
+        store = SettingsStore(session_factory)
+        store.save("license.max_machines", max_machines)
+        store.save("license.machines_used", machines_used)
+
+
+def read_machine_usage(settings) -> tuple[int, int]:
+    max_m = int(settings.get("license.max_machines", 1) or 1)
+    used = int(settings.get("license.machines_used", 1) or 1)
+    return max_m, used

@@ -86,7 +86,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     from magnetoclip.services.licensing.trial import ensure_trial_started
     from magnetoclip.ui.dialogs.activation import run_activation_gate
 
-    ensure_trial_started(context.settings)
+    ensure_trial_started(context.settings, context.session_factory)
     if not run_activation_gate(context):
         log.info("license_gate_aborted")
         lock.unlock()

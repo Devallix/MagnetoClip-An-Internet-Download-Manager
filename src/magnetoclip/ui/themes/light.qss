@@ -640,3 +640,84 @@ QLabel#overview_empty {
     color: $text_muted;
     padding: 24px;
 }
+
+/* ── activation dialog ─────────────────────────────────────────────── */
+
+QDialog#activation_dialog {
+    background-color: $surface;
+    border: 1px solid $border;
+    border-radius: 16px;
+}
+
+QFrame#activation_card {
+    background-color: transparent;
+}
+
+QLabel#activation_title {
+    font-size: 26px;
+    font-weight: 700;
+    color: $accent;
+}
+
+QLabel#activation_subtitle {
+    font-size: 13px;
+    color: $text_muted;
+}
+
+QLabel#activation_days {
+    font-size: 20px;
+    font-weight: 700;
+    color: $success;
+}
+
+QLineEdit#serial_input {
+    font-size: 15px;
+    padding: 10px 14px;
+    border: 2px solid $border;
+    border-radius: 10px;
+    background-color: $surface_alt;
+}
+
+QLineEdit#serial_input:focus {
+    border-color: $accent;
+}
+
+QPushButton[role="activation_primary"] {
+    background-color: $accent;
+    color: #FFFFFF;
+    border: 1px solid $accent;
+    border-radius: 10px;
+    padding: 10px 24px;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+QPushButton[role="activation_primary"]:hover {
+    background-color: $accent_blue;
+    border-color: $accent_blue;
+}
+
+QPushButton[role="activation_primary"]:pressed {
+    background-color: rgba(139, 92, 246, 0.7);
+}
+
+QPushButton[role="activation_primary"]:disabled {
+    background-color: $surface;
+    color: $text_muted;
+    border-color: $border;
+}
+
+QPushButton[role="activation_secondary"] {
+    background-color: transparent;
+    color: $text_muted;
+    border: 1px solid $border;
+    border-radius: 10px;
+    padding: 10px 24px;
+    font-size: 14px;
+}
+
+QPushButton[role="activation_secondary"]:hover {
+    color: $text;
+    background-color: $surface_alt;
+    border-color: $text_muted;
+}

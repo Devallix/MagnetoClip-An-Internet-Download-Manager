@@ -444,6 +444,10 @@ class SettingsPage(Page):
         row.addWidget(self.license_deactivate_button)
         cl.addLayout(row)
 
+        self.license_machines_label = QLabel("")
+        self.license_machines_label.setObjectName("card_caption")
+        cl.addWidget(self.license_machines_label)
+
         self.license_trial_label = QLabel("")
         self.license_trial_label.setObjectName("card_caption")
         cl.addWidget(self.license_trial_label)
@@ -533,6 +537,7 @@ class SettingsPage(Page):
         from magnetoclip.services.licensing.state import (
             format_masked_serial,
             last_validated_text,
+            read_machine_usage,
             read_serial,
         )
         from magnetoclip.services.licensing.trial import (
@@ -548,6 +553,18 @@ class SettingsPage(Page):
             last_validated_text(self.context.settings)
         )
         self.license_deactivate_button.setEnabled(bool(serial))
+
+        if serial:
+            max_m, used = read_machine_usage(self.context.settings)
+            if max_m > 1:
+                self.license_machines_label.setText(
+                    f"Multi-PC license — {used} of {max_m} PCs activated"
+                )
+            else:
+                self.license_machines_label.setText("Single PC license")
+            self.license_machines_label.show()
+        else:
+            self.license_machines_label.hide()
 
         if is_trial_active(self.context.settings):
             days = trial_days_remaining(self.context.settings)
@@ -871,7 +888,18 @@ class SettingsPage(Page):
 
     def _on_license_deactivated(self, serial: str, exc: Exception | None) -> None:
         from magnetoclip.services.licensing.state import clear_serial
+        from magnetoclip.services.licensing.client import NotBound
 
+        if isinstance(exc, NotBound):
+            clear_serial()
+            self._refresh_license_labels()
+            QMessageBox.information(
+                self,
+                "Deactivate License",
+                "This PC was already unbound from the server.\n"
+                "The local serial key has been cleared.",
+            )
+            return
         if isinstance(exc, Exception):
             QMessageBox.warning(
                 self,

@@ -1,10 +1,10 @@
 {
     "version": "0.2.7",
     "download_url": "https://github.com/Devallix/MagnetoClip-An-Internet-Download-Manager/raw/refs/heads/main/releases/MagnetoClip-0.2.7.zip",
-    "release_notes": "Upgraded to Version 0.2.7 (7-day free trial: first launch grants a no-questions-asked grace period before activation is required; trial countdown shown in status bar and Settings > License card; trial period configurable via trial.days setting)",
+    "release_notes": "(7-day free trial: first launch grants a no-questions-asked grace period before activation is required; trial countdown shown in status bar and Settings > License card; trial period configurable via trial.days setting)",
     "release_date": "2026-08-25",
     "min_version": "0.1.0",
-    "size_bytes": 78604671,
+    "size_bytes": 78608767,
     "filename": "MagnetoClip-0.2.7.zip",
-    "sha256": "03927c2551220900290a8d141d606014e0279cad94ed0d34a1320b77331d095c"
+    "sha256": "9e94a00d8338e2b9f8898dc67c507e1684f776d34f4a5ca202f924cc1fdd172e"
 }

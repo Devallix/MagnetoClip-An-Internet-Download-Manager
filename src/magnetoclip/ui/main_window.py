@@ -469,6 +469,7 @@ class MainWindow(QMainWindow):
         from magnetoclip.services.licensing.state import (
             format_masked_serial,
             last_validated_text,
+            read_machine_usage,
             read_serial,
         )
 
@@ -481,14 +482,18 @@ class MainWindow(QMainWindow):
                 "Manage your license in Settings after activation.",
             )
             return
-        QMessageBox.information(
-            self,
-            "License",
+        msg = (
             f"Serial: {format_masked_serial(serial)}\n"
-            f"Last verified online: {last_validated_text(self.context.settings)}\n\n"
-            "MagnetoClip verifies this license with the vendor server at every "
-            "launch. Manage devices under Settings → License.",
+            f"Last verified online: {last_validated_text(self.context.settings)}\n"
         )
+        max_m, used = read_machine_usage(self.context.settings)
+        if max_m > 1:
+            msg += f"\nMachines: {used} of {max_m} activated\n"
+        msg += (
+            "\nMagnetoClip verifies this license with the vendor server at every "
+            "launch. Manage devices under Settings → License."
+        )
+        QMessageBox.information(self, "License", msg)
 
     # ----- status -----
 

@@ -16,16 +16,23 @@ from magnetoclip.services.logging.setup import get_logger
 log = get_logger(__name__)
 
 
-def ensure_trial_started(settings) -> None:
+def ensure_trial_started(settings, session_factory=None) -> None:
     """Record the first-launch timestamp if not already set.
 
     This is idempotent — calling it multiple times has no effect after the
-    first call.
+    first call.  When *session_factory* is provided the value is persisted
+    to the database immediately so it survives restarts.
     """
     if settings.get("trial.first_launch"):
         return
     settings.set("trial.first_launch", datetime.now(UTC).isoformat())
     log.info("trial_started", first_launch=settings.get("trial.first_launch"))
+    if session_factory is not None:
+        from magnetoclip.database.repositories import SettingsStore
+
+        SettingsStore(session_factory).save(
+            "trial.first_launch", settings.get("trial.first_launch")
+        )
 
 
 def _first_launch_dt(settings) -> datetime | None:
