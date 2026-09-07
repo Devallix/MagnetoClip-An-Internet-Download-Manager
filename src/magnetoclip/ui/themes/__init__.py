@@ -42,6 +42,9 @@ def apply_theme(window: QMainWindow, *, theme: str = "dark") -> None:
         return
     app.setStyleSheet(build_qss(theme))
     app.setPalette(_palette_for(theme))
+    for widget in QApplication.allWidgets():
+        app.style().unpolish(widget)
+        app.style().polish(widget)
     from magnetoclip.ui.components.icons import set_theme as _set_icon_theme
 
     _set_icon_theme(theme)

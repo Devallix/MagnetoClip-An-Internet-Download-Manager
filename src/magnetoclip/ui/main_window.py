@@ -29,7 +29,7 @@ from magnetoclip.version import __version__
 from .categories import CATEGORY_LABELS, CATEGORY_ORDER, snapshot_category
 from .components.buttons import CategoryButton, VerticalIconButton
 from .components.capture_watcher import CaptureWatcher
-from .components.icons import category_icon, nav_icon
+from .components.icons import category_icon, nav_icon, text_icon
 from .components.tray import SystemTray
 from .dialogs.about import show_about
 from .pages import (
@@ -38,7 +38,9 @@ from .pages import (
     DetectedPage,
     DownloadsPage,
     OverviewPage,
+    PausePage,
     SettingsPage,
+    SpeedTestPage,
     TorrentsPage,
 )
 from .themes import apply_theme
@@ -55,6 +57,8 @@ NAV_ITEMS = [
     ("completed", "Completed"),
     ("torrents", "Torrents"),
     ("analytics", "Analytics"),
+    ("pause", "Pause"),
+    ("speedtest", "Speed"),
     ("browser", "Browser"),
     ("settings", "Settings"),
 ]
@@ -150,6 +154,7 @@ class MainWindow(QMainWindow):
         notifier = getattr(context, "notifier", None)
         if notifier is not None:
             notifier.attach_tray(self.tray)
+            notifier.enable_toasts()
 
         self._capture_watcher = CaptureWatcher(context, parent=self)
         self._capture_watcher.start()
@@ -173,6 +178,20 @@ class MainWindow(QMainWindow):
         eula_action = help_menu.addAction("License Agreement")
         eula_action.triggered.connect(
             lambda: self._show_markdown("EULA.md", "MagnetoClip — License Agreement")
+        )
+
+        privacy_action = help_menu.addAction("Privacy Policy")
+        privacy_action.triggered.connect(
+            lambda: self._show_markdown(
+                "PRIVACY_POLICY.md", "MagnetoClip — Privacy Policy"
+            )
+        )
+
+        tos_action = help_menu.addAction("Terms of Service")
+        tos_action.triggered.connect(
+            lambda: self._show_markdown(
+                "TERMS_OF_SERVICE.md", "MagnetoClip — Terms of Service"
+            )
         )
 
     def _show_markdown(self, filename: str, title: str) -> None:
@@ -202,6 +221,10 @@ class MainWindow(QMainWindow):
             layout.addWidget(button)
             self._nav_group.addButton(button)
             self._nav_buttons[key] = button
+
+        # Override the torrents button icon with the "T" glyph
+        if "torrents" in self._nav_buttons:
+            self._nav_buttons["torrents"].setIcon(text_icon("T"))
 
         layout.addStretch(1)
         about = VerticalIconButton(nav_icon("about"), "About")
@@ -280,6 +303,11 @@ class MainWindow(QMainWindow):
             nav_layout.addWidget(button)
             self._category_buttons[key] = button
 
+        # Override the torrent category icon with the "T" glyph
+        if "torrent" in self._category_buttons:
+            btn = self._category_buttons["torrent"]
+            btn.icon_label.setPixmap(text_icon("T").pixmap(QSize(18, 18)))
+
         nav_layout.addStretch(1)
 
         self._nav_scroll = QScrollArea()
@@ -310,6 +338,8 @@ class MainWindow(QMainWindow):
             "Completed": lambda: DownloadsPage(context, completed_only=True),
             "Torrents": lambda: TorrentsPage(context),
             "Analytics": lambda: AnalyticsPage(context),
+            "Pause": lambda: PausePage(context),
+            "Speed": lambda: SpeedTestPage(context),
             "Browser": lambda: BrowserPage(context),
             "Settings": lambda: SettingsPage(context),
         }

@@ -40,6 +40,7 @@ DEFAULTS: dict[str, Any] = {
     "network.proxy_profile": "direct",
     "network.max_bandwidth_mbps": 0.0,
     "network.default_proxy_id": 0,
+    "network.verify_tls": True,  # disable only for proxies/VPNs doing HTTPS inspection
     # Browser
     # Integration defaults ON: the extension is only ever loaded by an explicit
     # user action, so shipping it dead-by-default just produces a silent,
@@ -78,6 +79,35 @@ DEFAULTS: dict[str, Any] = {
     # Trial period (first-launch grace before activation is required).
     "trial.first_launch": "",   # ISO timestamp; set once on first launch
     "trial.days": 7,            # number of free trial days
+    # Duplicate detection
+    "dedup.enabled": True,
+    "dedup.auto_skip": False,
+    "dedup.hash_algo": "xxh3_128",
+    "dedup.index_after_download": True,
+    "dedup.only_same_filename": True,
+    # Pause: simple manual pause switch with optional auto-resume timer
+    "pause.enabled": False,
+    "pause.auto_resume_hours": 0,  # 0 = stay paused until resumed manually
+    "pause.resume_at": "",          # ISO UTC timestamp when auto-resume fires
+    # Network speed monitor
+    "speedtest.enabled": True,
+    "speedtest.test_server": "",
+    "speedtest.test_size_mb": 25,
+    "speedtest.auto_test_enabled": False,
+    "speedtest.auto_test_interval_hours": 12,
+    "speedtest.throttle_sensitivity": 0.3,
+    # Built-in file preview
+    "preview.enabled": True,
+    "preview.video_player": "internal",
+    "preview.pdf_viewer": "internal",
+    # Webpage archiver
+    "archiver.enabled": True,
+    "archiver.inline_images": True,
+    "archiver.inline_css": True,
+    "archiver.inline_js": False,
+    "archiver.max_resource_size": 5,
+    "archiver.timeout": 30,
+    "archiver.add_metadata": True,
 }
 
 

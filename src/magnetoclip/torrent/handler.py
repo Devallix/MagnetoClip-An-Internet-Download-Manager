@@ -16,6 +16,10 @@ from .types import TorrentSpec, TorrentStatus
 
 log = get_logger(__name__)
 
+# Event names (duplicated here to avoid a heavy import cycle; keep in sync
+# with ``magnetoclip.core.events.bus.Events``).
+_NAME_RESOLVED = "torrent.name_resolved"
+
 # libtorrent alert type names we care about
 _ALERT_ADD_TORRENT = "add_torrent_alert"
 _ALERT_TORRENT_FINISHED = "torrent_finished_alert"
@@ -151,7 +155,45 @@ class TorrentDownloadHandler:
         if self.spec.magnet_uri:
             await self._wait_for_metadata(handle)
 
+        self._publish_name_if_available(handle)
+
         return handle
+
+    def _publish_name_if_available(self, handle: Any) -> None:
+        """Publish the real torrent title to the bus once metadata arrives.
+
+        Magnets without a ``dn=`` display name only get a real title after
+        libtorrent fetches the metadata from peers. When that name becomes
+        known, we forward it so the manager can store it and the UI Name
+        column can stop showing the 'magnet_' placeholder.
+        """
+        try:
+            if not handle.has_metadata():
+                return
+        except Exception:
+            return
+        try:
+            raw = self.client.get_status(self.spec.download_id)
+        except Exception:
+            return
+        if not raw:
+            return
+        name = (raw.get("name") or "").strip()
+        if not name:
+            return
+        # If the spec already carried a real title (e.g. a .torrent file or a
+        # magnet with dn=) don't clobber the more specific user-provided name
+        # with the single-file torrent directory name.
+        if name == self.spec.filename:
+            return
+        self.bus.post(
+            _NAME_RESOLVED,
+            {
+                "id": self.spec.download_id,
+                "filename": name,
+                "info_hash": raw.get("info_hash") or "",
+            },
+        )
 
     async def _wait_for_metadata(self, handle: Any, timeout: float = 120.0) -> None:
         """Wait for torrent metadata to arrive (magnet links need this)."""
@@ -289,6 +331,19 @@ class TorrentDownloadHandler:
                 "max": status.num_peers,
             },
         )
+
+        # Once the real name is known, forward it so the manager can store it
+        # and refresh the Name column (which may currently show 'magnet_').
+        name = (status.name or "").strip()
+        if name and name != self.spec.filename:
+            self.bus.post(
+                _NAME_RESOLVED,
+                {
+                    "id": status.download_id,
+                    "filename": name,
+                    "info_hash": status.info_hash,
+                },
+            )
 
     def cancel(self) -> None:
         self._cancel_event.set()

@@ -133,6 +133,10 @@ class CaptureDialog(QDialog):
         self.skip_button.clicked.connect(lambda: self.done(RESULT_SKIP))
         buttons.addWidget(self.skip_button)
         self.skip_all_button = GhostButton("Skip all")
+        self.skip_all_button.setToolTip(
+            "Move all currently detected files to the Detection page; "
+            "future files still ask for confirmation"
+        )
         self.skip_all_button.clicked.connect(lambda: self.done(RESULT_SKIP_ALL))
         buttons.addWidget(self.skip_all_button)
         buttons.addStretch(1)

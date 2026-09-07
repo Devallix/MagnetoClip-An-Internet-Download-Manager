@@ -31,7 +31,7 @@ Combined capabilities:
 - Download acceleration
 - Browser integration
 - Media/resource detection
-- Scheduling
+- Pause & auto-resume
 - Queue management
 - File organization
 - Download history
@@ -122,7 +122,7 @@ magnetoclip/
 │   │   ├── downloads/manager.py       # DownloadManager (facade over engine)
 │   │   ├── downloads/model.py         # Download dataclass + state enum
 │   │   ├── queues/manager.py          # queues + queue_items
-│   │   ├── scheduler/scheduler.py     # time/day/bandwidth schedules
+│   │   ├── pause/manager.py         # global pause switch + auto-resume timer
 │   │   ├── categories/manager.py      # categories + auto-categorization rules
 │   │   └── events/bus.py              # pub/sub event bus (Qt signals)
 │   ├── engine/
@@ -166,7 +166,7 @@ magnetoclip/
 │   │   ├── pages/downloads.py
 │   │   ├── pages/queue.py
 │   │   ├── pages/completed.py
-│   │   ├── pages/scheduler.py
+│   │   ├── pages/pause.py
 │   │   ├── pages/analytics.py
 │   │   ├── pages/categories.py
 │   │   ├── pages/browser.py
@@ -207,9 +207,10 @@ magnetoclip/
 - **downloads** — id, url, filename, save_path, category_id, queue_id, size_total, size_downloaded, status, speed_avg, speed_peak, priority, connections_max, connections_active, proxy_profile_id, headers_json, auth_ref, etag, last_modified, hash_algo, hash_expected, hash_calculated, created_at, started_at, completed_at, error, retry_count
 - **download_segments** — id, download_id, index, start_byte, end_byte, downloaded, status, attempts
 - **categories** — id, name, folder, icon, color, rules_json (extension/type rules for auto-categorization)
-- **queues** — id, name, max_concurrent, schedule_id
+- **queues** — id, name, max_concurrent
 - **queue_items** — id, queue_id, download_id, position
-- **schedules** — id, name, start_time, end_time, days_mask, speed_day, speed_night, enabled
+- **pause** — global switch + auto-resume timer, stored in settings
+  (`pause.enabled` / `pause.auto_resume_hours` / `pause.resume_at`)
 - **settings** — key (PK), value_json
 - **browser_events** — id, source, url, detected_type, ts
 - **download_statistics** — id, download_id, ts, speed, connections, bandwidth_used
@@ -322,11 +323,11 @@ Hashing runs chunk-by-chunk (1 MB) via `asyncio.to_thread` so it never blocks th
 │               │                                    │
 │  ↓ Downloads  │  Search downloads...               │
 │               │                                    │
-│  ◷ Queue      │  ┌──────────────────────────────┐ │
+│  ◷ Detected   │  ┌──────────────────────────────┐ │
 │               │  │ Ubuntu.iso                   │ │
 │  ✓ Completed  │  │ ███████████████░░  78%      │ │
 │               │  │ 8.4 MB/s • 2m 31s remaining │ │
-│  ⏰ Scheduler │  └──────────────────────────────┘ │
+│  ⏯ Pause     │  └──────────────────────────────┘ │
 │               │                                    │
 │  📊 Analytics │  ┌──────────────────────────────┐ │
 │               │  │ Blender.zip                  │ │
@@ -341,7 +342,7 @@ Hashing runs chunk-by-chunk (1 MB) via `asyncio.to_thread` so it never blocks th
 
 ### 8.2 Sidebar Navigation
 
-Overview · Downloads · Queue · Completed · Scheduler · Analytics · Categories · Browser · Settings. Potential future: **Magneto Center** (advanced system/network information).
+Overview · Downloads · Detected · Completed · Torrents · Analytics · Pause · Speed · Browser · Settings. Potential future: **Magneto Center** (advanced system/network information).
 
 ### 8.3 Download Detail Panel
 
@@ -349,7 +350,7 @@ Status, progress %, speed, connections (12/16), downloaded/total, time remaining
 
 ### 8.4 Context Menu
 
-Start · Pause · Resume · Stop · Restart · Open File · Open Folder · Copy URL · Copy Download Information · Verify Integrity · Change Priority · Move to Queue · Schedule · Remove · Remove and Delete File.
+Start · Pause · Resume · Stop · Restart · Open File · Open Folder · Copy URL · Copy Download Information · Verify Integrity · Change Priority · Remove · Remove and Delete File.
 
 ### 8.5 System Tray
 
@@ -373,15 +374,18 @@ Today's stats: downloaded GB, downloads count, average speed, peak speed. Charts
 
 ---
 
-## 9. Queues, Scheduling, Bandwidth
+## 9. Queues, Pause, Bandwidth
 
 ### 9.1 Queues
 
-Users create named queues (e.g. "Software"): Ubuntu.iso → VSCode.exe → Python.exe → Git.exe. Options: start/pause/stop/reorder, schedule, limit simultaneous downloads, auto-advance to next item.
+Users create named queues (e.g. "Software"): Ubuntu.iso → VSCode.exe → Python.exe → Git.exe. Options: start/pause/stop/reorder, limit simultaneous downloads, auto-advance to next item.
 
-### 9.2 Scheduler
+### 9.2 Pause & Auto-Resume
 
-Time windows (e.g. 01:00–06:00), day masks (Mon–Sun), bandwidth per window (daytime max 2 MB/s, night unlimited).
+A single **Pause** switch stops every running and waiting download immediately;
+downloads added while paused stay in the paused list. An optional **Auto-Resume**
+timer (0–168 h) flips back automatically, with a live countdown shown on the
+Pause page. State is persisted in settings and survives restarts.
 
 ### 9.3 Bandwidth Management
 
@@ -453,7 +457,7 @@ Qt UI thread is never blocked.
                      │
               Async Controller (qasync event loop)
                      │
-             Download Scheduler
+             Download Manager
                      │
         ┌────────────┼────────────┐
         ↓            ↓            ↓
@@ -482,12 +486,12 @@ Heavy CPU work (hashing, metadata) → `asyncio.to_thread` / ThreadPoolExecutor.
 
 1. **Foundation** — repo layout, pyproject, settings, logging, DB + models + migrations, event bus, qasync bootstrap, empty themed shell window.
 2. **MagnetoCore** — single-connection httpx download with progress/cancel → Range segmentation → pause/resume → `.mclip` persistence → retry/backoff → hashing. Engine testable headless.
-3. **Download Manager** — multi-download concurrency, queues, categories, priority, scheduler, bandwidth throttling, history.
+3. **Download Manager** — multi-download concurrency, queues, categories, priority, pause control, bandwidth throttling, history.
 4. **Modern UI** — full design system: sidebar, dashboard, download cards, detail panel, settings pages, dark/light themes, animations, notifications, tray.
 5. **Browser integration** — extension + native messaging host + capture dialog.
 6. **Advanced networking** — proxies, auth, headers/cookies, connection tuning, network detection.
 7. **Media engine** — detection, metadata, optional ffmpeg.
-8. **Intelligence** — adaptive allocator, auto-categorization, smart scheduling, network-aware bandwidth, server capability detection.
+8. **Intelligence** — adaptive allocator, auto-categorization, smart pause & auto-resume, network-aware bandwidth, server capability detection.
 9. **Analytics** — statistics + dashboard charts.
 10. **Security & hardening** — audit, path-traversal testing, credential protection, crash/recovery testing.
 11. **Testing** — full layered suite (below).
@@ -497,7 +501,7 @@ Heavy CPU work (hashing, metadata) → `asyncio.to_thread` / ThreadPoolExecutor.
 
 ## 17. MVP Definition (v0.1 → v0.5)
 
-**Core:** HTTP/HTTPS, multi-connection, resume, pause, retry, cancel, queue, multiple simultaneous downloads, download history, categories, scheduling, bandwidth control.
+**Core:** HTTP/HTTPS, multi-connection, resume, pause, retry, cancel, queue, multiple simultaneous downloads, download history, categories, pause control, bandwidth control.
 **UI:** MagnetoClip branding, modern dark theme, dashboard, download list, download details, settings, notifications, system tray.
 **Reliability:** crash recovery, persistent download state, integrity checking, structured logging.
 
@@ -506,7 +510,7 @@ Heavy CPU work (hashing, metadata) → `asyncio.to_thread` / ThreadPoolExecutor.
 ## 18. Version Roadmap
 
 - **0.1** — Core Engine (basic download functionality)
-- **0.5** — Advanced Download Manager (queues, scheduler, categories, bandwidth)
+- **0.5** — Advanced Download Manager (queues, pause, categories, bandwidth)
 - **0.9** — Browser Integration (capture from browsers)
 - **1.0** — *Capture the Web.* Stable public release
 - **1.5** — Intelligent Download Engine (adaptive connections, optimization)

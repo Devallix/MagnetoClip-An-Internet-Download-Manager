@@ -138,6 +138,43 @@ def _migration_009_drop_queue_tables(engine: Engine) -> None:
         pass
 
 
+def _migration_010_drop_download_rules(engine: Engine) -> None:
+    """Remove the download rules table (feature removed)."""
+    try:
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS download_rules"))
+            conn.commit()
+    except Exception:
+        pass
+
+
+def _migration_011_file_hashes(engine: Engine) -> None:
+    """Add the file hashes table for duplicate detection."""
+    from .models import FileHash
+
+    FileHash.__table__.create(engine, checkfirst=True)
+
+
+def _migration_012_schedule_rules(engine: Engine) -> None:
+    """Legacy weekly download windows (retained for version numbering)."""
+    # table is no longer created; migration 014 drops it from existing DBs
+    return
+
+
+def _migration_013_speed_tests(engine: Engine) -> None:
+    """Add the speed test results table."""
+    from .models import SpeedTest
+
+    SpeedTest.__table__.create(engine, checkfirst=True)
+
+
+def _migration_014_drop_schedule_rules(engine: Engine) -> None:
+    """Drop the weekly download-window table (feature removed)."""
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS schedule_rules"))
+
+
 MIGRATIONS: list[Migration] = [
     _migration_001_create_all,
     _migration_002_media_columns,
@@ -148,6 +185,11 @@ MIGRATIONS: list[Migration] = [
     _migration_007_torrent_columns,
     _migration_008_torrent_search_history,
     _migration_009_drop_queue_tables,
+    _migration_010_drop_download_rules,
+    _migration_011_file_hashes,
+    _migration_012_schedule_rules,
+    _migration_013_speed_tests,
+    _migration_014_drop_schedule_rules,
 ]
 
 

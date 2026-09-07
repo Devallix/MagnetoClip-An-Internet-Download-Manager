@@ -39,7 +39,7 @@ def test_main_window_constructs(qtbot, context):
     qtbot.addWidget(window)
     assert window.windowTitle() == f"MagnetoClip {__version__}"
     assert window.sidebar is not None
-    assert window.stack.count() == 8
+    assert window.stack.count() == 10
 
 
 def test_navigation_switches_pages(qtbot, context):
@@ -60,6 +60,7 @@ def test_downloads_name_column_is_adjustable(qtbot, context):
     page = window._pages["Downloads"]
     header = page.table.horizontalHeader()
     assert header.sectionResizeMode(1) == QHeaderView.Interactive
+
 
 
 def test_sidebar_finished_unfinished_buttons(qtbot, context):
@@ -168,7 +169,7 @@ def test_categories_page_removed(qtbot, context):
     qtbot.addWidget(window)
     assert "categories" not in window._nav_buttons
     assert "Categories" not in window._pages
-    assert window.stack.count() == 8
+    assert window.stack.count() == 10
 
 
 def test_queue_and_scheduler_pages_removed(qtbot, context):
@@ -340,8 +341,11 @@ def test_browser_capture_toggle_persists(qtbot, context):
     assert page.capture_check.isChecked() is False
 
 
-def test_capture_watcher_skip_all_click_activates_suppression(qtbot, context):
-    from magnetoclip.database.repositories import PendingCaptureRepository
+def test_capture_watcher_skip_all_click_parks_to_detection(qtbot, context):
+    from magnetoclip.database.repositories import (
+        BrowserDetectionRepository,
+        PendingCaptureRepository,
+    )
     from magnetoclip.ui.components.capture_watcher import CaptureWatcher
     from magnetoclip.ui.dialogs.capture import RESULT_SKIP_ALL
 
@@ -353,12 +357,19 @@ def test_capture_watcher_skip_all_click_activates_suppression(qtbot, context):
 
     watcher._apply_decision(first, RESULT_SKIP_ALL, None)
 
-    assert skip_all_active(context) is True
+    assert skip_all_active(context) is False
     with context.session_factory() as session:
         repo = PendingCaptureRepository(session)
         assert repo.pending() == []
         assert repo.get(first.id).status == "rejected"
         assert repo.get(second.id).status == "rejected"
+        urls = {
+            file.get("url")
+            for detection in BrowserDetectionRepository(session).list_detections()
+            for file in (detection.files_json or [])
+        }
+    assert "https://example.com/a.zip" in urls
+    assert "https://example.com/b.zip" in urls
 
 
 def test_capture_watcher_suppresses_dialog_while_skip_all_active(qtbot, context):
@@ -380,8 +391,7 @@ def test_capture_watcher_suppresses_dialog_while_skip_all_active(qtbot, context)
         assert PendingCaptureRepository(session).pending() == []
 
 
-def test_capture_watcher_skip_all_re_enabled(qtbot, context):
-    from magnetoclip.browser.skip import disable_skip_all
+def test_capture_watcher_skip_all_does_not_suppress_future_captures(qtbot, context):
     from magnetoclip.database.repositories import PendingCaptureRepository
     from magnetoclip.ui.components.capture_watcher import CaptureWatcher
     from magnetoclip.ui.dialogs.capture import RESULT_SKIP_ALL
@@ -391,15 +401,56 @@ def test_capture_watcher_skip_all_re_enabled(qtbot, context):
         capture = PendingCaptureRepository(session).add("https://example.com/a.zip")
 
     watcher._apply_decision(capture, RESULT_SKIP_ALL, None)
-    assert skip_all_active(context) is True
-
-    disable_skip_all(context)
     assert skip_all_active(context) is False
 
     with context.session_factory() as session:
         PendingCaptureRepository(session).add("https://example.com/b.zip")
     with context.session_factory() as session:
         assert len(PendingCaptureRepository(session).pending()) == 1
+
+
+def test_capture_watcher_syncs_browser_host_downloads(qtbot, context):
+    from magnetoclip.core.events.bus import Events
+    from magnetoclip.database.models import DownloadStatus
+    from magnetoclip.database.repositories import DownloadRepository
+    from magnetoclip.ui.components.capture_watcher import CaptureWatcher
+
+    watcher = CaptureWatcher(context)
+    watcher.poll()
+
+    posted: list[tuple[str, int]] = []
+    context.events.connect(
+        Events.DOWNLOAD_ADDED,
+        lambda payload: posted.append(("added", payload["id"])),
+    )
+    context.events.connect(
+        Events.DOWNLOAD_UPDATED,
+        lambda payload: posted.append(("updated", payload["id"])),
+    )
+
+    # Simulate the browser-host process: it writes an archive job straight to
+    # the shared DB with no local events (separate process).
+    with context.session_factory() as session:
+        repo = DownloadRepository(session)
+        download = repo.add(
+            "https://example.com/page",
+            filename="page.html",
+            save_path="page.html",
+        )
+        download.status = DownloadStatus.queued
+        session.commit()
+        download_id = download.id
+
+    watcher.poll()
+    assert ("added", download_id) in posted
+
+    with context.session_factory() as session:
+        download = DownloadRepository(session).get(download_id)
+        download.status = DownloadStatus.completed
+        session.commit()
+
+    watcher.poll()
+    assert ("updated", download_id) in posted
 
 
 def test_browser_page_manual_setup_steps(qtbot, context):
@@ -528,7 +579,7 @@ def test_download_context_menu_completed(qtbot, context, tmp_path):
     menu = page._build_context_menu(download.id)
     actions = menu.actions()
     assert [a.text() for a in actions if a.text()] == [
-        "Open File", "Open File Location", "Restart Download",
+        "Open File", "Open File Location", "Preview", "Restart Download",
         "Copy URL", "Remove from List",
     ]
     assert actions[0].isEnabled()
@@ -877,3 +928,116 @@ def test_torrents_page_placeholder_does_not_desync_rows(qtbot, context):
     page._on_removed({"id": 1})
     assert page.table.rowCount() == 1
     assert page._empty_row == 0
+
+
+def test_torrents_page_lists_site_links(qtbot, context):
+    from magnetoclip.ui.pages.torrents import TorrentsPage
+
+    page = TorrentsPage(context)
+    qtbot.addWidget(page)
+
+    urls = [entry[1] for entry in page._sites]
+    assert urls == [
+        "https://web.yts.gg/",
+        "https://en.eztv-official.is/",
+        "https://thepiratebay.org/",
+        "https://www.1377x.to/",
+    ]
+
+
+def test_notifier_prefers_toast_with_tray_fallback(qtbot, context, monkeypatch):
+    import sys
+    import types
+
+    from magnetoclip.services.notification import notifier as notifier_module
+    from magnetoclip.services.notification.notifier import Notifier
+
+    class FakeTray:
+        def __init__(self):
+            self.shown = []
+
+        def is_available(self):
+            return True
+
+        def show_message(self, title, body, download_id=None, action=None):
+            self.shown.append((title, body, download_id, action))
+
+    fake_winsound = types.ModuleType("winsound")
+    fake_winsound.MB_ICONASTERISK = 0x40
+    fake_winsound.MessageBeep = lambda icon: None
+    monkeypatch.setitem(sys.modules, "winsound", fake_winsound)
+
+    shown_toasts = []
+    monkeypatch.setattr(
+        notifier_module.win_toast,
+        "show_toast",
+        lambda title, body, launch=None: shown_toasts.append((title, body, launch)) or True,
+    )
+    tray = FakeTray()
+    notifier = Notifier(context, tray=tray, toast_enabled=True)
+    notifier._on_notification(
+        {
+            "kind": "completed",
+            "title": "clip.mp4",
+            "body": "Download complete",
+            "download_id": 3,
+        }
+    )
+    assert shown_toasts == [("clip.mp4", "Download complete", "magneto://reveal?download=3")]
+    assert tray.shown == []
+    notifier.close()
+
+
+def test_notifier_falls_back_to_tray_when_toast_fails(qtbot, context, monkeypatch):
+    import sys
+    import types
+
+    from magnetoclip.services.notification import notifier as notifier_module
+    from magnetoclip.services.notification.notifier import Notifier
+
+    class FakeTray:
+        def __init__(self):
+            self.shown = []
+
+        def is_available(self):
+            return True
+
+        def show_message(self, title, body, download_id=None, action=None):
+            self.shown.append((title, body, download_id, action))
+
+    fake_winsound = types.ModuleType("winsound")
+    fake_winsound.MessageBeep = lambda icon: None
+    monkeypatch.setitem(sys.modules, "winsound", fake_winsound)
+    monkeypatch.setattr(notifier_module.win_toast, "show_toast", lambda title, body, launch=None: False)
+
+    tray = FakeTray()
+    notifier = Notifier(context, tray=tray, toast_enabled=True)
+    notifier._on_notification(
+        {"kind": "completed", "title": "a.zip", "body": "Download complete", "download_id": 9}
+    )
+    assert tray.shown == [("a.zip", "Download complete", 9, None)]
+    notifier.close()
+
+
+def test_overview_recent_cards_not_height_capped(qtbot, context):
+    """Recent activity cards must keep their natural height instead of shrinking."""
+    window = MainWindow(context)
+    qtbot.addWidget(window)
+    window._activate("Overview")
+    page = window._pages["Overview"]
+
+    page._upsert_recent(
+        {
+            "id": 1,
+            "filename": "clip.mp4",
+            "url": "https://example.com/clip.mp4",
+            "status": "downloading",
+            "speed": 2048.0,
+            "size_total": 1000,
+            "size_downloaded": 100,
+        }
+    )
+    card = page.recent_cards[1]
+    assert card.maximumHeight() > 90
+    assert card.minimumSizeHint().height() <= card.maximumHeight()
+    assert page.recent_scroll is not None

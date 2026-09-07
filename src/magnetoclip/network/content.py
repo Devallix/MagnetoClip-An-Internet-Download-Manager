@@ -12,6 +12,39 @@ from pathlib import PurePosixPath
 
 HTML_EXTENSIONS = frozenset({".html", ".htm", ".xhtml", ".mht", ".mhtml"})
 
+# A small map from common Content-Type media types to a filename extension.
+# Used to give extensionless CDN URLs (e.g. Google's encrypted-tbn0.gstatic.com
+# image thumbnails) a usable extension based on what the server actually serves.
+_CONTENT_TYPE_EXTENSIONS: dict[str, str] = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "image/bmp": "bmp",
+    "image/svg+xml": "svg",
+    "image/avif": "avif",
+    "image/x-icon": "ico",
+    "application/pdf": "pdf",
+    "video/mp4": "mp4",
+    "video/webm": "webm",
+    "video/x-matroska": "mkv",
+    "audio/mpeg": "mp3",
+    "audio/mp4": "m4a",
+    "audio/ogg": "ogg",
+    "audio/wav": "wav",
+    "application/zip": "zip",
+    "application/x-7z-compressed": "7z",
+    "application/x-rar-compressed": "rar",
+}
+
+
+def content_type_extension(content_type: str | None) -> str | None:
+    """Return a filename extension (no dot) for a Content-Type, or None."""
+    if not content_type:
+        return None
+    media = content_type.split(";", 1)[0].strip().lower()
+    return _CONTENT_TYPE_EXTENSIONS.get(media)
+
 
 def looks_like_html_content_type(content_type: str | None) -> bool:
     """True when a Content-Type header names an HTML family document."""

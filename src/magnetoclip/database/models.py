@@ -170,6 +170,26 @@ class VerifiedRun(Base):
     download: Mapped[Download] = relationship(back_populates="verified_runs")
 
 
+class FileHash(Base):
+    """An indexed digest of a downloaded file, used for duplicate detection.
+
+    Uniqueness is keyed on ``hash_algo + hash_value`` so the same file content
+    (regardless of filename) is recognised as a duplicate. ``size`` is stored
+    for an inexpensive first-pass size check before hashing.
+    """
+
+    __tablename__ = "file_hashes"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    file_path: Mapped[str] = mapped_column(String(4096), nullable=False)
+    filename: Mapped[str] = mapped_column(String(1024), nullable=False)
+    size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    hash_algo: Mapped[str] = mapped_column(String(32), nullable=False)
+    hash_value: Mapped[str] = mapped_column(String(128), nullable=False)
+    category_id: Mapped[Optional[int]] = mapped_column(ForeignKey("categories.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class BrowserEvent(Base):
     __tablename__ = "browser_events"
 
@@ -256,3 +276,20 @@ class TorrentSearchHistory(Base):
     site: Mapped[str] = mapped_column(String(64), nullable=False)
     results_json: Mapped[Optional[dict]] = mapped_column(JSON)
     ts: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class SpeedTest(Base):
+    """A single network speed test result."""
+
+    __tablename__ = "speed_tests"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    ts: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    download_mbps: Mapped[Optional[float]] = mapped_column(Float)
+    upload_mbps: Mapped[Optional[float]] = mapped_column(Float)
+    latency_ms: Mapped[Optional[float]] = mapped_column(Float)
+    server_name: Mapped[Optional[str]] = mapped_column(String(128))
+    server_url: Mapped[Optional[str]] = mapped_column(String(512))
+    isp_name: Mapped[Optional[str]] = mapped_column(String(128))
+    test_size_mb: Mapped[int] = mapped_column(Integer, default=25)
+    error: Mapped[Optional[str]] = mapped_column(Text)

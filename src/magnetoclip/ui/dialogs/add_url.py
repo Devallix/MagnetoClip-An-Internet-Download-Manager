@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -120,6 +121,14 @@ class AddUrlDialog(QDialog):
         self.cookies_edit.setPlaceholderText("session=abc123")
         layout.addWidget(self.cookies_edit)
 
+        self.archive_check = QCheckBox(
+            "Save as a self-contained webpage archive (offline HTML)"
+        )
+        self.archive_check.setToolTip(
+            "Fetch the page and inline its images/CSS so it works offline"
+        )
+        layout.addWidget(self.archive_check)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel
         )
@@ -232,3 +241,6 @@ class AddUrlDialog(QDialog):
         from magnetoclip.network.cookies.jar import parse_cookie_header
 
         return parse_cookie_header(text)
+
+    def archive(self) -> bool:
+        return self.archive_check.isChecked()

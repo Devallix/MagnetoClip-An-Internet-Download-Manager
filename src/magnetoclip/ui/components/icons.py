@@ -8,7 +8,8 @@ switching only clears the icon cache.
 
 from __future__ import annotations
 
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 
 from magnetoclip.resources import resource_path
 
@@ -23,6 +24,8 @@ _NAV_FILES = {
     "completed": "checkmark",
     "torrents": "download",
     "analytics": "statistics",
+    "pause": "pause",
+    "speedtest": "monitor",
     "browser": "internet",
     "settings": "settings",
     "about": "info",
@@ -114,3 +117,28 @@ def type_icon(media_type: str | None) -> QIcon:
 
 def type_color(media_type: str | None) -> str:
     return _TYPE_COLORS[_type_key(media_type)]
+
+
+def text_icon(
+    letter: str,
+    size: int = 22,
+    *,
+    bg: str = "#4ADE80",
+    fg: str = "#1A1A2E",
+    font_size: int = 14,
+) -> QIcon:
+    """Return a *QIcon* consisting of *letter* rendered on a filled square.
+
+    This is a lightweight way to get category/tool icons that aren't in the
+    bundled PNG set without shipping extra assets.
+    """
+    pixmap = QPixmap(size, size)
+    pixmap.fill(QColor(bg))
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    font = QFont("Segoe UI", font_size, QFont.Weight.Bold)
+    painter.setFont(font)
+    painter.setPen(QColor(fg))
+    painter.drawText(pixmap.rect(), Qt.AlignCenter, letter)
+    painter.end()
+    return QIcon(pixmap)

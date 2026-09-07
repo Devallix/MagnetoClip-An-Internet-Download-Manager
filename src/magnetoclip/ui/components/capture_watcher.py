@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 from PySide6.QtCore import QObject, QTimer
 
-from magnetoclip.browser.skip import enable_skip_all, skip_all_active
+from magnetoclip.browser.skip import skip_all_active
 from magnetoclip.core.events.bus import Events
 from magnetoclip.database.repositories import (
     BrowserDetectionRepository,
@@ -41,6 +41,7 @@ class CaptureWatcher(QObject):
         self.context = context
         self._dialog_factory = dialog_factory or self._default_dialog
         self._dialog_open = False
+        self._download_fingerprint: dict[int, tuple[str, ...]] = {}
         self._timer = QTimer(self)
         self._timer.setInterval(POLL_INTERVAL_MS)
         self._timer.timeout.connect(self.poll)
@@ -64,9 +65,71 @@ class CaptureWatcher(QObject):
     def poll(self) -> int:
         """Process detections and captures. Returns the number of items handled."""
         handled = self._handle_detections()
+        self._sync_downloads()
         if not self._dialog_open:
             handled += self._handle_captures()
         return handled
+
+    def _sync_downloads(self) -> None:
+        """Mirror download rows written by the browser-host process into the GUI.
+
+        The native-messaging host runs in a separate process and only shares the
+        database, so the archive downloads it creates never emit events here.
+        Every poll we fingerprint the most recent downloads and re-emit local
+        events for rows that changed, so the Downloads page reflects host-side
+        archive jobs (progress -> completed) without waiting for a manual page
+        refresh. GUI-initiated downloads are already live via normal events, so
+        re-emitting for them is harmless deduplication.
+        """
+        from sqlalchemy import select
+
+        from magnetoclip.database.models import Download
+
+        with self.context.session_factory() as session:
+            rows = session.execute(
+                select(
+                    Download.id,
+                    Download.status,
+                    Download.filename,
+                    Download.detected_type,
+                    Download.size_total,
+                    Download.size_downloaded,
+                    Download.save_path,
+                    Download.completed_at,
+                    Download.error,
+                )
+                .order_by(Download.created_at.desc())
+                .limit(200)
+            ).all()
+        if not rows:
+            self._download_fingerprint = {}
+            return
+        seen: dict[int, tuple[str, ...]] = {}
+        for row in rows:
+            seen[int(row.id)] = tuple(
+                str(value) if value is not None else "" for value in row
+            )
+        if seen == self._download_fingerprint:
+            return
+        previous = self._download_fingerprint
+        self._download_fingerprint = seen
+        manager = getattr(self.context, "manager", None)
+        if manager is None:
+            return
+        for download_id, fingerprint in seen.items():
+            if previous.get(download_id) == fingerprint:
+                continue
+            download = manager.get_download(download_id)
+            if download is None:
+                continue
+            self.context.events.post(
+                (
+                    Events.DOWNLOAD_ADDED
+                    if download_id not in previous
+                    else Events.DOWNLOAD_UPDATED
+                ),
+                manager.snapshot_item(download),
+            )
 
     # ----- page detections (notifications) -----
 
@@ -106,7 +169,23 @@ class CaptureWatcher(QObject):
         if not pending:
             return 0
         capture = pending[0]
+        log.info(
+            "capture_dialog_showing",
+            capture_id=capture.id,
+            url=capture.url,
+            filename=capture.filename,
+        )
         self._dialog_open = True
+        # Raise the main window before showing the dialog so it isn't lost
+        # behind the browser when the user right-clicks to capture a file.
+        parent = self.parent()
+        if parent is not None:
+            try:
+                parent.show()
+                parent.raise_()
+                parent.activateWindow()
+            except Exception:  # noqa: BLE001 - window activation is best-effort
+                pass
         try:
             dialog = self._dialog_factory(capture)
             result = dialog.exec()
@@ -121,8 +200,7 @@ class CaptureWatcher(QObject):
 
     def _apply_decision(self, capture, result, dialog) -> None:
         if result == RESULT_SKIP_ALL:
-            enable_skip_all(self.context)
-            self._reject_all_pending()
+            self._park_all_pending_as_detections()
             return
         if result == RESULT_SKIP:
             self._resolve(capture.id, "rejected")
@@ -172,6 +250,32 @@ class CaptureWatcher(QObject):
                 capture_id, status, download_id=download_id
             )
 
-    def _reject_all_pending(self) -> None:
+    def _park_all_pending_as_detections(self) -> None:
+        """Move every queued capture to the Detection page.
+
+        "Skip all" does not arm the persistent skip flag anymore — arming it
+        also ticked the "Skip all detected files without asking" checkbox in
+        Settings, and silenced future captures the user did not ask to silence.
+        It just parks the already-detected files as page detections so they can
+        be reviewed or downloaded from the Detection page; future captures keep
+        popping the confirmation dialog.
+        """
         with self.context.session_factory() as session:
-            PendingCaptureRepository(session).resolve_all("rejected")
+            repo = PendingCaptureRepository(session)
+            by_page: dict[str, list[dict]] = {}
+            for capture in repo.pending():
+                page = capture.referrer or capture.url
+                file: dict = {
+                    "url": capture.url,
+                    "filename": capture.filename or "",
+                    "detected_type": capture.detected_type or "file",
+                }
+                if capture.data_base64:
+                    file["data_base64"] = capture.data_base64
+                by_page.setdefault(page, []).append(file)
+            detection_repo = BrowserDetectionRepository(session)
+            for page, files in by_page.items():
+                detection_repo.add(
+                    page, count=len(files), files=files[:50], notified=True
+                )
+            repo.resolve_all("rejected")

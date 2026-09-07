@@ -41,6 +41,14 @@ def _extract_magnet_uri(argv: list[str]) -> str | None:
     return None
 
 
+def _extract_command_uri(argv: list[str]) -> str | None:
+    """Return the first ``magneto://`` command URI found in *argv*, or ``None``."""
+    for arg in argv[1:]:
+        if arg.lower().startswith("magneto://") and not arg.startswith("-"):
+            return arg
+    return None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     argv = list(sys.argv if argv is None else argv)
     if BROWSER_HOST_FLAG in argv:
@@ -69,11 +77,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not is_magnet_registered():
             register_magnet()
 
+    from magnetoclip.services.shell.protocol import (
+        is_magneto_registered,
+        register_magneto_protocol,
+    )
+    if not is_magneto_registered():
+        register_magneto_protocol()
+
     lock = acquire_single_instance_lock(context.data_dir)
     if lock is None:
         magnet_uri = _extract_magnet_uri(argv)
         torrent_file = _find_torrent_arg(argv)
-        payload = magnet_uri or torrent_file
+        command_uri = _extract_command_uri(argv)
+        payload = magnet_uri or torrent_file or command_uri
         if payload and _forward_to_running_instance(payload):
             log.info("forwarded_to_running_instance", payload=payload[:80])
             return 0
@@ -103,6 +119,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     torrent_file_arg = _find_torrent_arg(argv)
     magnet_uri_arg = _extract_magnet_uri(argv)
+    command_uri_arg = _extract_command_uri(argv)
 
     if context.settings.get("browser.integration_enabled", False):
         try:
@@ -122,6 +139,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         window.show()
         log.info("main_window_shown")
 
+        # Start background loops for the pause auto-resume timer and auto speed
+        # tests now that the event loop is actually running (they cannot be
+        # created earlier in build_context because no loop exists yet).
+        pauses = getattr(context, "pauses", None)
+        if pauses is not None:
+            pauses.start_loop()
+        speedtest = getattr(context, "speedtest", None)
+        if speedtest is not None:
+            speedtest.start_auto()
+
         # Bring up the LAN dashboard while the window task is safely
         # suspended: creating tasks during a synchronous stretch of this
         # coroutine risks qasync stepping them re-entrantly (Py3.13 guard).
@@ -136,6 +163,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if torrent_file_arg:
             from PySide6.QtCore import QTimer
             QTimer.singleShot(500, lambda: _open_torrent_file(window, torrent_file_arg))
+
+        if command_uri_arg:
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(500, lambda uri=command_uri_arg: _dispatch_command_uri(window, uri))
 
         if context.settings.get("updates.check_enabled", True):
             from PySide6.QtCore import QThread, Signal
@@ -276,12 +307,25 @@ def _start_ipc_server(window) -> None:
                 if raw:
                     log.info("ipc_received", payload=raw[:80])
                     from PySide6.QtCore import QTimer
-                    QTimer.singleShot(100, lambda url=raw: _open_torrent_file(window, url))
+                    if raw.lower().startswith("magneto://"):
+                        QTimer.singleShot(100, lambda uri=raw: _dispatch_command_uri(window, uri))
+                    else:
+                        QTimer.singleShot(100, lambda url=raw: _open_torrent_file(window, url))
             socket.deleteLater()
 
     server.newConnection.connect(_on_new_connection)
     # prevent GC
     window._ipc_server = server
+
+
+def _dispatch_command_uri(window, uri: str) -> None:
+    """Apply a ``magneto://`` command delivered via argv or IPC on the GUI window."""
+    from magnetoclip.services.shell.commands import apply_command
+
+    try:
+        apply_command(window, uri)
+    except Exception as exc:
+        log.warning("command_uri_failed", error=str(exc), uri=uri[:80])
 
 
 def _open_torrent_file(window, torrent_path: str) -> None:
@@ -298,10 +342,12 @@ def _open_torrent_file(window, torrent_path: str) -> None:
         if dialog.exec():
             manager = window.context.manager
             try:
-                download = manager.add(
-                    url=dialog.url(),
-                    category_name=dialog.category() or None,
-                )
+                kwargs: dict = {"url": dialog.url()}
+                if dialog.filename():
+                    kwargs["filename"] = dialog.filename()
+                if dialog.category():
+                    kwargs["category_name"] = dialog.category()
+                download = manager.add(**kwargs)
                 if is_magnet_link(download.url) or download.detected_type == "torrent":
                     manager._pending_torrent_opts[download.id] = {
                         "sequential": dialog.sequential(),

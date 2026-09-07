@@ -10,8 +10,10 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
+    QWidget,
 )
 
 from magnetoclip.core.events.bus import Events
@@ -103,10 +105,16 @@ class OverviewPage(Page):
         grid.addWidget(self.speed_card, 1, 1)
         layout.addLayout(grid)
 
+        # ── indexed files stat (duplicate detection) ─────────────────────────
+        self.indexed_card = StatCard("Files indexed for duplicates")
+        self.indexed_card.set_accent("#F59E0B")
+        self.indexed_card.setMinimumHeight(72)
+        layout.addWidget(self.indexed_card)
+
         # ── recent activity section card ─────────────────────────────────────
         activity_frame = QFrame()
         activity_frame.setObjectName("card")
-        activity_frame.setMaximumHeight(300)
+        activity_frame.setMaximumHeight(340)
         activity_inner = QVBoxLayout(activity_frame)
         activity_inner.setContentsMargins(16, 14, 16, 14)
         activity_inner.setSpacing(8)
@@ -115,17 +123,31 @@ class OverviewPage(Page):
         activity_title.setObjectName("card_title")
         activity_inner.addWidget(activity_title)
 
+        self.recent_scroll = QScrollArea()
+        self.recent_scroll.setObjectName("recent_scroll")
+        self.recent_scroll.setFrameShape(QFrame.NoFrame)
+        self.recent_scroll.setWidgetResizable(True)
+        self.recent_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.recent_scroll.setFixedHeight(252)
+
+        self.recent_container = QWidget()
+        self.recent_container.setObjectName("recent_container")
         self.recent_cards: dict[int, DownloadCard] = {}
-        self.recent_layout = QVBoxLayout()
+        self.recent_layout = QVBoxLayout(self.recent_container)
+        self.recent_layout.setContentsMargins(0, 0, 0, 0)
         self.recent_layout.setSpacing(8)
-        activity_inner.addLayout(self.recent_layout)
 
         self.empty_label = QLabel(
             "No recent activity yet. Start a download to see it appear here."
         )
         self.empty_label.setObjectName("overview_empty")
         self.empty_label.setAlignment(Qt.AlignCenter)
-        activity_inner.addWidget(self.empty_label)
+        self.empty_label.setWordWrap(True)
+        self.recent_layout.addWidget(self.empty_label)
+        self.recent_layout.addStretch(1)
+
+        self.recent_scroll.setWidget(self.recent_container)
+        activity_inner.addWidget(self.recent_scroll)
 
         layout.addWidget(activity_frame)
 
@@ -199,7 +221,6 @@ class OverviewPage(Page):
         card = self.recent_cards.get(snapshot["id"])
         if card is None:
             card = DownloadCard()
-            card.setMaximumHeight(90)
             self.recent_layout.insertWidget(0, card)
             self.recent_cards[snapshot["id"]] = card
         card.update_snapshot(snapshot)
@@ -208,6 +229,7 @@ class OverviewPage(Page):
             oldest = self.recent_cards.pop(oldest_id)
             self.recent_layout.removeWidget(oldest)
             oldest.deleteLater()
+        self.recent_scroll.verticalScrollBar().setValue(0)
         self.empty_label.setVisible(len(self.recent_cards) == 0)
 
     def refresh(self) -> None:
@@ -226,3 +248,18 @@ class OverviewPage(Page):
         self.completed_card.set_value(str(completed))
         self.bytes_card.set_value(format_bytes(total_bytes))
         self.empty_label.setVisible(len(self.recent_cards) == 0)
+        self._refresh_indexed_card()
+
+    def _refresh_indexed_card(self) -> None:
+        if not hasattr(self, "indexed_card"):
+            return
+        dedup = getattr(self.context, "dedup", None)
+        if dedup is None:
+            self.indexed_card.set_value("0")
+            return
+        try:
+            stats = dedup.stats()
+        except Exception:  # noqa: BLE001 - best-effort stats
+            self.indexed_card.set_value("0")
+            return
+        self.indexed_card.set_value(f"{stats.indexed_files} files")

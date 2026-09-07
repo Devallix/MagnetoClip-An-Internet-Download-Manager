@@ -13,9 +13,11 @@ from .models import (
     Category,
     Download,
     DownloadStatus,
+    FileHash,
     PendingCapture,
     ProxyProfile,
     Setting,
+    SpeedTest,
 )
 
 
@@ -351,12 +353,22 @@ class BrowserDetectionRepository:
         The page shows each URL once even when several pages reference it, so
         removing a listed file must clear it from all detections.
         """
+        self.remove_urls_everywhere({url})
+
+    def remove_urls_everywhere(self, urls: set[str]) -> None:
+        """Drop every *urls* entry from all detections in a single pass.
+
+        Removals are batched: one table scan plus one commit, instead of one
+        scan per URL, so "Remove" stays fast when many files are selected.
+        """
+        if not urls:
+            return
         changed = False
         for detection in self.session.scalars(select(BrowserDetection)).all():
             files = [
                 f
                 for f in (detection.files_json or [])
-                if str(f.get("url") or "") != url
+                if str(f.get("url") or "") not in urls
             ]
             if files:
                 if len(files) != len(detection.files_json or []):
@@ -455,6 +467,190 @@ class BrowserRequestRepository:
         for request in stale:
             request.status = "expired"
             request.result_json = {"message": "timed out"}
+        if stale:
+            self.session.commit()
+        return len(stale)
+
+
+class FileHashRepository:
+    """Data-access operations for the duplicate-detection file index."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def add(
+        self,
+        file_path: str,
+        filename: str,
+        size: int,
+        hash_algo: str,
+        hash_value: str,
+        *,
+        category_id: int | None = None,
+    ) -> FileHash:
+        entry = FileHash(
+            file_path=file_path,
+            filename=filename,
+            size=size,
+            hash_algo=hash_algo,
+            hash_value=hash_value,
+            category_id=category_id,
+        )
+        self.session.add(entry)
+        self.session.commit()
+        self.session.refresh(entry)
+        return entry
+
+    def get(self, entry_id: int) -> Optional[FileHash]:
+        return self.session.get(FileHash, entry_id)
+
+    def by_hash(self, hash_algo: str, hash_value: str) -> Optional[FileHash]:
+        return self.session.scalar(
+            select(FileHash).where(
+                FileHash.hash_algo == hash_algo,
+                FileHash.hash_value == hash_value,
+            )
+        )
+
+    def by_hash_all(self, hash_algo: str, hash_value: str) -> list[FileHash]:
+        return list(
+            self.session.scalars(
+                select(FileHash).where(
+                    FileHash.hash_algo == hash_algo,
+                    FileHash.hash_value == hash_value,
+                )
+            ).all()
+        )
+
+    def by_size(self, size: int) -> list[FileHash]:
+        """Files of exactly *size* bytes, for a cheap first-pass size check."""
+        return list(
+            self.session.scalars(
+                select(FileHash).where(FileHash.size == size)
+            ).all()
+        )
+
+    def list(self, limit: int = 500, offset: int = 0) -> list[FileHash]:
+        return list(
+            self.session.scalars(
+                select(FileHash).order_by(FileHash.created_at.desc()).limit(limit).offset(offset)
+            ).all()
+        )
+
+    def count(self) -> int:
+        from sqlalchemy import func
+
+        return int(
+            self.session.scalar(select(func.count()).select_from(FileHash)) or 0
+        )
+
+    def remove(self, entry: FileHash) -> None:
+        self.session.delete(entry)
+        self.session.commit()
+
+    def remove_by_file_path(self, file_path: str) -> int:
+        entries = list(
+            self.session.scalars(
+                select(FileHash).where(FileHash.file_path == file_path)
+            ).all()
+        )
+        for entry in entries:
+            self.session.delete(entry)
+        if entries:
+            self.session.commit()
+        return len(entries)
+
+
+class SpeedTestRepository:
+    """Data-access operations for network speed test results."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def add(
+        self,
+        *,
+        download_mbps: float | None = None,
+        upload_mbps: float | None = None,
+        latency_ms: float | None = None,
+        server_name: str | None = None,
+        server_url: str | None = None,
+        isp_name: str | None = None,
+        test_size_mb: int = 25,
+        error: str | None = None,
+    ) -> SpeedTest:
+        test = SpeedTest(
+            download_mbps=download_mbps,
+            upload_mbps=upload_mbps,
+            latency_ms=latency_ms,
+            server_name=server_name,
+            server_url=server_url,
+            isp_name=isp_name,
+            test_size_mb=test_size_mb,
+            error=error,
+        )
+        self.session.add(test)
+        self.session.commit()
+        self.session.refresh(test)
+        return test
+
+    def largest(self, limit: int = 200) -> list[SpeedTest]:
+        return list(
+            self.session.scalars(
+                select(SpeedTest)
+                .order_by(SpeedTest.ts.desc())
+                .limit(limit)
+            ).all()
+        )
+
+    def list(self, limit: int = 500, offset: int = 0) -> list[SpeedTest]:
+        return list(
+            self.session.scalars(
+                select(SpeedTest)
+                .order_by(SpeedTest.ts.desc())
+                .limit(limit)
+                .offset(offset)
+            ).all()
+        )
+
+    def count(self) -> int:
+        from sqlalchemy import func
+
+        return int(
+            self.session.scalar(select(func.count()).select_from(SpeedTest)) or 0
+        )
+
+    def stats(self) -> dict[str, Any]:
+        from sqlalchemy import func
+
+        row = self.session.execute(
+            select(
+                func.count().label("count"),
+                func.avg(SpeedTest.download_mbps).label("avg_download"),
+                func.max(SpeedTest.download_mbps).label("max_download"),
+                func.min(SpeedTest.download_mbps).label("min_download"),
+                func.avg(SpeedTest.latency_ms).label("avg_latency"),
+                func.max(SpeedTest.latency_ms).label("max_latency"),
+            ).select_from(SpeedTest)
+        ).one()
+        return {
+            "count": int(row.count or 0),
+            "avg_download_mbps": row.avg_download,
+            "max_download_mbps": row.max_download,
+            "min_download_mbps": row.min_download,
+            "avg_latency_ms": row.avg_latency,
+            "max_latency_ms": row.max_latency,
+        }
+
+    def remove(self, test: SpeedTest) -> None:
+        self.session.delete(test)
+        self.session.commit()
+
+    def prune(self, keep: int = 500) -> int:
+        rows = self.list(limit=100000)
+        stale = rows[keep:]
+        for row in stale:
+            self.session.delete(row)
         if stale:
             self.session.commit()
         return len(stale)

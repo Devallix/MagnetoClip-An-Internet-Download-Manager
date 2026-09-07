@@ -7,7 +7,9 @@ from .browser import BrowserPage
 from .detected import DetectedPage
 from .downloads import DownloadsPage
 from .overview import OverviewPage
+from .pause import PausePage
 from .settings import SettingsPage
+from .speedtest import SpeedTestPage
 from .torrents import TorrentsPage
 
 __all__ = [
@@ -16,6 +18,8 @@ __all__ = [
     "DetectedPage",
     "DownloadsPage",
     "OverviewPage",
+    "PausePage",
     "SettingsPage",
+    "SpeedTestPage",
     "TorrentsPage",
 ]

@@ -512,6 +512,28 @@ def test_resume_requeues_when_slots_full(tmp_path, monkeypatch):
     assert _status(manager, third.id) == DownloadStatus.queued
 
 
+async def test_download_posts_start_and_complete_notifications(tmp_path):
+    context = make_context(tmp_path)
+    manager: DownloadManager = context.manager
+    kinds: list[str] = []
+    context.events.connect(
+        Events.NOTIFICATION_REQUESTED,
+        lambda payload: kinds.append(str(payload.get("kind"))),
+    )
+    payload = b"notification-feedback"
+    with PayloadServer(payload) as server:
+        download = manager.add(server.url, filename="notify.bin")
+        assert manager.start(download.id) is True
+        assert await wait_for(
+            lambda: _status(manager, download.id) == DownloadStatus.completed
+        )
+    # "started" fires on the first transition into downloading; "completed"
+    # fires exactly once at the end.
+    assert kinds.count("started") == 1
+    assert kinds.count("completed") == 1
+    assert kinds.index("started") < kinds.index("completed")
+
+
 # ----- helpers -----
 
 

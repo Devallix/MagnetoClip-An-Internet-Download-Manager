@@ -17,8 +17,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QMenu,
     QMessageBox,
-    QProgressDialog,
     QProgressBar,
+    QProgressDialog,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -287,7 +287,8 @@ class DownloadsPage(Page):
             return
         manager = self.context.manager
         try:
-            download = manager.add(
+            download = self._add_with_dedup_dialog(
+                manager,
                 dialog.url(),
                 filename=dialog.filename() or None,
                 save_dir=dialog.directory() or None,
@@ -297,11 +298,35 @@ class DownloadsPage(Page):
                 auth_username=dialog.auth_username(),
                 auth_password=dialog.auth_password(),
                 cookies=dialog.cookies(),
+                archive=dialog.archive(),
             )
         except ValueError as exc:
             QMessageBox.warning(self, "Cannot Add Download", str(exc))
             return
-        manager.start(download.id)
+        if not dialog.archive():
+            manager.start(download.id)
+
+    def _add_with_dedup_dialog(self, manager, *args, **kwargs):
+        """Add synchronously, prompting the user if a duplicate is detected."""
+        decision = getattr(self.context, "dedup_decision", None)
+        if decision is None:
+
+            def _ask(payload):
+                from magnetoclip.ui.dialogs.duplicate_result import (
+                    DuplicateResultDialog,
+                )
+
+                dlg = DuplicateResultDialog(payload, parent=self)
+                if dlg.exec():
+                    return dlg.result_action()
+                return "skip"
+
+            self.context.dedup_decision = _ask
+            try:
+                return manager.add(*args, **kwargs)
+            finally:
+                self.context.dedup_decision = decision
+        return manager.add(*args, **kwargs)
 
     # ----- blob: URL downloads (fetched from the browser) -----
 
@@ -468,6 +493,11 @@ class DownloadsPage(Page):
             open_location.triggered.connect(
                 lambda: self._reveal_saved(save_path)
             )
+            preview = menu.addAction("Preview")
+            preview.setEnabled(self._can_preview(snapshot))
+            preview.triggered.connect(
+                lambda: self._preview_saved(download_id)
+            )
             menu.addSeparator()
             menu.addAction("Restart Download").triggered.connect(
                 lambda: self._restart_download(download_id)
@@ -501,6 +531,83 @@ class DownloadsPage(Page):
     def _open_saved(self, save_path: str | None) -> None:
         if save_path and Path(save_path).is_file():
             open_path(Path(save_path))
+
+    def _can_preview(self, snapshot) -> bool:
+        if not snapshot.get("save_path"):
+            return False
+        manager = getattr(self.context, "manager", None)
+        if manager is None:
+            return False
+        download = manager.get_download(snapshot["id"])
+        if download is None:
+            return False
+        # Fast path: the resolver recognises the stored path.
+        preview = getattr(self.context, "preview", None)
+        if preview is not None and preview.type_of_download(download) != "none":
+            return True
+        # Fallback: the file exists on disk even if the extension is
+        # unrecognised — allow the dialog to try opening it externally.
+        return Path(snapshot["save_path"]).is_file()
+
+    def _preview_saved(self, download_id: int) -> None:
+        from magnetoclip.services.preview.resolver import PreviewType
+
+        from ..dialogs.preview import PreviewDialog
+
+        preview = getattr(self.context, "preview", None)
+        manager = getattr(self.context, "manager", None)
+        if preview is None or manager is None:
+            return
+        download = manager.get_download(download_id)
+        if download is None:
+            return
+        path = self._first_existing_path(download)
+        if not path:
+            from PySide6.QtWidgets import QMessageBox
+
+            QMessageBox.information(
+                self.window(),
+                "Preview",
+                "The file no longer exists on disk.",
+            )
+            return
+        preview_type = preview.resolve(path)
+        if preview_type == PreviewType.NONE:
+            # File exists but the resolver doesn't recognise the extension —
+            # offer to open it with the system default application instead.
+            from ..util import open_path
+
+            open_path(Path(path))
+            return
+        dialog = PreviewDialog(self.context, path, preview_type, parent=self.window())
+        dialog.exec()
+
+    def _first_existing_path(self, download) -> str | None:
+        preview = getattr(self.context, "preview", None)
+        if preview is not None:
+            for candidate in preview.filenames(download):
+                if candidate and Path(candidate).is_file():
+                    return candidate
+        media = (getattr(download, "media_metadata_json", None) or {})
+        for candidate in (
+            getattr(download, "save_path", None),
+            media.get("path"),
+        ):
+            if candidate and Path(candidate).is_file():
+                return candidate
+        # Fallback: search the parent directory for a file matching the
+        # download's filename.  The stored save_path can drift from the
+        # actual on-disk name after sanitization or engine reconciliation.
+        save_path = getattr(download, "save_path", None)
+        if save_path:
+            target = Path(save_path)
+            parent = target.parent
+            stem = target.stem.lower()
+            if parent.is_dir():
+                for child in parent.iterdir():
+                    if child.is_file() and child.stem.lower().startswith(stem):
+                        return str(child)
+        return None
 
     def _reveal_saved(self, save_path: str | None) -> None:
         if save_path:

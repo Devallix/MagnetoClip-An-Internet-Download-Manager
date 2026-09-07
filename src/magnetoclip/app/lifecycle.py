@@ -60,6 +60,14 @@ def build_context(
     context.categories = categories
     context.proxies = proxies
 
+    from magnetoclip.core.dedup.manager import DedupManager
+
+    context.dedup = DedupManager(context, database.Session)
+
+    from magnetoclip.core.pause.manager import PauseController
+
+    context.pauses = PauseController(context)
+
     manager = DownloadManager(context)
     context.manager = manager
 
@@ -68,6 +76,18 @@ def build_context(
 
     context.analytics = AnalyticsService(context)
     context.notifier = Notifier(context)
+
+    from magnetoclip.services.speedtest import SpeedTestService
+
+    context.speedtest = SpeedTestService(context)
+
+    from magnetoclip.services.archiver import WebpageArchiver
+
+    context.archiver = WebpageArchiver(context)
+
+    from magnetoclip.services.preview import PreviewService
+
+    context.preview = PreviewService(context)
 
     from magnetoclip.browser.service import BrowserIntegrationService
 

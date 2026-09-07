@@ -21,9 +21,13 @@ detects downloadable content as you browse.
 8. [Remote dashboard](#8-remote-dashboard)
 9. [Proxy profiles](#9-proxy-profiles)
 10. [Settings reference](#10-settings-reference)
-11. [System tray](#11-system-tray)
-12. [Where MagnetoClip stores your data](#12-where-magnetoclip-stores-your-data)
-13. [Troubleshooting](#13-troubleshooting)
+11. [File preview](#11-file-preview)
+12. [Webpage archive](#12-webpage-archive)
+13. [Pause control](#13-pause-control)
+14. [Speed test](#14-speed-test)
+15. [System tray](#15-system-tray)
+16. [Where MagnetoClip stores your data](#16-where-magnetoclip-stores-your-data)
+17. [Troubleshooting](#17-troubleshooting)
 
 ---
 
@@ -134,6 +138,17 @@ Six stat cards (total, completed, failed, data downloaded, average speed, peak
 speed), two bar charts covering the last 14 days (**Downloads per day** and
 **Bandwidth per day**) and a per-category breakdown.
 
+### Pause
+
+A single switch that pauses every running and waiting download instantly, plus
+an optional auto-resume countdown timer (see [section 13](#13-pause-control)).
+
+### Speed
+
+Built-in network speed test that measures download, upload and latency with an
+animated gauge, keeps a history and flags possible ISP throttling (see
+[section 14](#14-speed-test)).
+
 ### Browser
 
 Setup hub for the MagnetoClip Companion extension (see
@@ -141,8 +156,10 @@ Setup hub for the MagnetoClip Companion extension (see
 
 ### Settings
 
-Every tunable option, grouped into Downloads, Torrent, Proxy, Updates, Remote
-Control and License (see [section 10](#10-settings-reference)).
+Every tunable option, grouped into General, Downloads, Duplicate Detection,
+Network Speed Test, File Preview, Webpage Archiver, Browser & Capture, Torrent,
+Proxy, Updates, Remote Control and License (see
+[section 10](#10-settings-reference)).
 
 ---
 
@@ -218,9 +235,13 @@ button (when shown) pushes the published extension via browser policy.
 
 When a file is detected you get a **Downloadable file detected** popup with
 filename, save location, category and connection count, plus four choices:
-**Skip**, **Skip all** (suppresses popups — permanently if opened from
-Settings, otherwise for one hour), **Download later** (queue without starting)
-and **Download now**.
+**Skip** (skip just this file), **Skip all** (move all currently detected files
+to the **Detected** page; future files still ask for confirmation),
+**Download later** (queue without starting) and **Download now**.
+
+To stop the confirmation popups entirely, use **Settings → Browser & Capture →
+Skip all detected files without asking** — that is the only control that turns
+the popups off, and it is just as easy to turn back on.
 
 Detected files also collect on the **Detected** page even if you skip the
 popup.
@@ -335,6 +356,31 @@ dialog. Use **Direct (no proxy)** to bypass.
 See the capture-modes table in [section 5](#5-browser-integration), plus
 **Streaming media quality** (Best / 1080p / 720p / Audio only).
 
+### Network Speed Test
+
+| Setting | Default | Meaning |
+|---|---|---|
+| Enable built-in network speed tests | on | Master switch for the Speed page |
+| Run speed tests automatically | off | Periodically run a test in the background |
+| Test size | 25 MB | Amount downloaded per test |
+| Interval | 12 h | How often automatic tests run |
+
+### File Preview
+
+| Setting | Default | Meaning |
+|---|---|---|
+| Enable built-in file preview | on | Master switch for the in-app viewer (see [section 11](#11-file-preview)) |
+
+### Webpage Archive
+
+| Setting | Default | Meaning |
+|---|---|---|
+| Enable webpage archiving | on | Master switch for the Archiver (see [section 12](#12-webpage-archive)) |
+| Inline images as base64 | on | Embed images directly in the HTML |
+| Inline CSS | on | Embed stylesheets so they survive offline |
+| Inline JavaScript | off | Embed scripts too — can change how pages render |
+| Max resource size | 5 MB | Skip resources larger than this |
+
 ### Torrent
 
 See the engine-options table in [section 7](#7-torrents).
@@ -357,7 +403,122 @@ Shows the masked serial and last-verified timestamp, with
 
 ---
 
-## 11. System tray
+## 11. File preview
+
+Finished downloads can be previewed **inside the app** — images, text, video,
+audio and torrent metadata — without opening an external program. Preview only
+improves the experience of downloads you already have: nothing extra is
+downloaded and no new files are created.
+
+### Where to find it
+
+- **Downloads page** — right-click a completed download and choose **Preview**.
+- **Download Details** — the **Preview** button on a finished download.
+
+### What the in-app viewer can show
+
+- **Images** — `.jpg/.jpeg`, `.png`, `.gif`, `.webp`, `.bmp`, `.svg`, `.tiff`,
+  `.heic/.heif`, `.avif` and more, with zoom and fit-to-window
+- **Text and source code** — `.txt`, `.json`, `.csv`, `.xml`, `.md`, `.py`,
+  `.js`, `.css` and more, up to **5 MB**
+- **Video** — `.mp4`, `.mkv`, `.webm`, `.avi`, `.mov`, `.m4v` and more, played
+  with playback controls
+- **Audio** — `.mp3`, `.flac`, `.ogg`, `.wav`, `.aac`, `.m4a` and more, with
+  playback controls
+- **Torrents** — metadata: name, size, info hash and file list
+
+**PDFs** are handed to the system's default PDF viewer instead. Files the
+viewer does not recognise open in their default application. To switch the
+whole feature off, clear **Settings → Built-in File Preview**.
+
+---
+
+## 12. Webpage archive
+
+Save any webpage as a **self-contained offline copy**: one `.html` file with
+its images and stylesheets embedded, ready to open with no internet.
+
+### Archiving from the browser
+
+With browser integration enabled (see [section 5](#5-browser-integration)),
+right-click any `http://` or `https://` page and choose **Archive this page
+with MagnetoClip**. The app fetches the page server-side — only the URL (and
+cookie/referrer data) crosses the native-messaging bridge, never the page's
+bytes — and saves it as `<title>.html` in your download folder as a
+**Webpage** download.
+
+### Archiving from the app
+
+On the Downloads page click **Add**, paste the page's address, and tick
+**Save as a self-contained webpage archive (offline HTML)**.
+
+### Tuning
+
+Embedding options live under **Settings → Webpage Archive**. Images and CSS
+are inlined by default for a faithful offline copy; JavaScript embedding is
+off by default because it can change how pages render. **Max resource size**
+skips page resources larger than the limit.
+
+---
+
+## 13. Pause control
+
+The **Pause** page replaces the old weekly time-window scheduler with one
+unambiguous control: a single switch that pauses everything, with an optional
+countdown that resumes downloads automatically.
+
+### Pausing
+
+Open **Pause** and tick **Pause all downloads**. Every running and waiting
+download stops immediately, and downloads added while paused stay in the
+paused list instead of starting. The status label confirms the current state.
+
+To resume, untick the switch — or wait for the auto-resume timer (below). The
+pause state is saved with your settings and survives restarts.
+
+### Auto-resume
+
+While paused you can set **Automatically resume after** to a number of hours
+(1–168). The default **0 h (off)** keeps downloads paused until you flip the
+switch back. With a timer set, the page shows a live countdown
+(*Resuming in 3 h 05 min*) and downloads restart on their own when it reaches
+zero.
+
+### How it works
+
+- Waiting and running downloads pause right away.
+- Downloads added while paused stay in the paused list.
+- Flip the switch back on (or wait for the timer) to resume.
+
+---
+
+## 14. Speed test
+
+The **Speed** page measures your connection with a built-in test:
+
+- **Run Test** — full test: download → upload → latency. Progress shows the
+  current phase (*Download…* / *Upload…*) with a percentage, and the animated
+  gauge centres on the upload speed while uploading.
+- **Upload Test** — measures upload speed and latency only.
+- **Export CSV** — saves your test history to a CSV file.
+
+### Results
+
+- **Download** and **Upload** cards — throughput in Mbps.
+- **Latency** card — ping in milliseconds.
+- **Server** card — the test server used.
+- **ISP** label — your provider, when identified.
+- **History** — your recent test runs with timestamps.
+- **ISP Throttling** — compares runs over time and warns when a result looks
+  throttled.
+
+A card shows `--` until its metric has been measured at least once. Use
+**Settings → Network Speed Test** to enable the page, turn on automatic
+background tests, and tune the test size and interval.
+
+---
+
+## 15. System tray
 
 MagnetoClip lives in the tray while running. The tooltip shows active count
 and aggregate speed. The tray menu offers:
@@ -373,7 +534,7 @@ clicking a detected-file notification jumps to the Detected page.
 
 ---
 
-## 12. Where MagnetoClip stores your data
+## 16. Where MagnetoClip stores your data
 
 | Data | Location |
 |---|---|
@@ -387,7 +548,7 @@ download history; nothing is uploaded.
 
 ---
 
-## 13. Troubleshooting
+## 17. Troubleshooting
 
 **The app asks for a serial every start.**
 Check your internet connection; the app must reach the license server to
@@ -396,6 +557,10 @@ validate. If the network is fine, re-enter the key once.
 **"Verification failed" on a download.**
 The file did not match its expected integrity data after transfer. Use
 right-click → **Retry Download**.
+
+**Speed test cards show `--`.**
+A card stays `--` until its metric has been measured: run **Run Test** to fill
+all cards, or **Upload Test** for upload + latency only.
 
 **Blob download hangs at 0 %.**
 Keep the browser tab the URL was copied from open until the fetch completes.

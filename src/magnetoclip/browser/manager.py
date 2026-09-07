@@ -68,6 +68,8 @@ class BrowserManager:
             return self._capture(message)
         if message_type == "capture_chunk":
             return self._capture_chunk(message)
+        if message_type == "archive":
+            return self._archive(message)
         if message_type == "page_scan":
             return self._page_scan(message)
         if message_type == "capture_result":
@@ -95,6 +97,19 @@ class BrowserManager:
             detected_type=message.get("detected_type") or "",
             has_data=bool(data_base64),
         )
+        # Scope guard for downloads the extension auto-intercept may offer
+        # before its own settings snapshot has re-synced (service-worker
+        # restarts reset its in-memory flags to the defaults, so it can claim
+        # a non-media file even when MagnetoClip is not the default
+        # downloader). Honor the real settings here: refuse the capture so the
+        # browser keeps the file.
+        from_extension = message.get("source") == "extension"
+        if from_extension and not self.context.settings.get(
+            "browser.default_downloader", False
+        ):
+            capture_enabled = self.context.settings.get("browser.capture_enabled", True)
+            if not capture_enabled or not self._is_media_capture(message):
+                return {"type": "capture_skipped", "url": url}
         if data_base64:
             # In-memory media (Telegram blob: images): no HTTP URL to validate
             # or probe — the bytes already travelled to us.
@@ -112,25 +127,41 @@ class BrowserManager:
         if skip_all_active(self.context):
             return self._skip_capture(message, url)
 
-        # Right-click and popup captures are explicit user actions: start the
-        # download immediately, without probing or asking for confirmation.
+        # Right-click and popup captures are explicit user actions. They
+        # ALWAYS go through the confirmation dialog (pre-filled with the
+        # captured URL) so the user can review and adjust the download before
+        # it starts — silently auto-starting can produce confusing failures
+        # (e.g. 403) on hotlinked media such as images from Wikimedia.
         explicit = message.get("source") in ("context_menu", "popup")
+        if explicit:
+            return self._queue_pending(message, url, data_base64)
         # Auto-detected media from social platforms always goes through the
         # confirmation dialog; it must never silently download a whole feed.
         auto_detected = message.get("source") == "page_scan"
-        if not explicit and not auto_detected and not data_base64:
+        # When MagnetoClip is set as the default downloader, extension-
+        # intercepted downloads bypass the probe.  The browser already
+        # validated the URL by starting the download; probing again can
+        # reject legitimate files (e.g. HTML error pages from CDNs that
+        # actually serve the file, or URLs behind redirects).
+        default_downloader = self.context.settings.get(
+            "browser.default_downloader", False
+        )
+        skip_probe = default_downloader and from_extension
+        if not auto_detected and not data_base64 and not skip_probe:
             probe_error = self._probe_for_capture(message, url)
             if probe_error:
                 return {"type": "capture_error", "message": probe_error}
-        if not explicit and (
-            auto_detected or self.context.settings.get("browser.confirm_capture", True)
+        if auto_detected:
+            return self._queue_pending(message, url, data_base64)
+        # When MagnetoClip is the default downloader, extension-intercepted
+        # downloads start immediately — the user already committed to the
+        # download by clicking the link/button in the browser.
+        if self.context.settings.get("browser.confirm_capture", True) and not (
+            default_downloader and from_extension
         ):
             return self._queue_pending(message, url, data_base64)
 
         if self.manager is None:
-            # The browser-host process has no download manager of its own, so
-            # an explicit user action (popup/context-menu download) is queued
-            # for the main app's watcher instead of failing outright.
             return self._queue_pending(message, url, data_base64)
         return self._start_immediately(message, url, filename, data_base64)
 
@@ -138,6 +169,13 @@ class BrowserManager:
         self, message: dict[str, Any], url: str, data_base64: str | None
     ) -> dict[str, Any]:
         capture = self._enqueue_pending_capture(message, url, data_base64)
+        log.info(
+            "capture_queued_pending",
+            capture_id=capture.id,
+            url=url,
+            source=message.get("source"),
+            filename=capture.filename,
+        )
         self.context.events.post(
             Events.BROWSER_EVENT,
             {
@@ -216,6 +254,59 @@ class BrowserManager:
                 "data_base64": payload,
             }
         )
+
+    def _archive(self, message: dict[str, Any]) -> dict[str, Any]:
+        """Fetch and inline a webpage into a self-contained .html file.
+
+        Triggered by the extension's "Archive this page" action. Archiving runs
+        entirely in the app (the archiver fetches the page server-side), so no
+        bytes travel over native messaging — only the URL (+ cookies/referrer).
+        """
+        if not self.context.settings.get("browser.integration_enabled", False):
+            return {
+                "type": "archive_error",
+                "message": "integration disabled in MagnetoClip",
+            }
+        if not self.context.settings.get("archiver.enabled", True):
+            return {
+                "type": "archive_error",
+                "message": "webpage archiving is disabled in MagnetoClip",
+            }
+        url = str(message.get("url") or "").strip()
+        error = self._validate_url(url)
+        if error:
+            return {"type": "archive_error", "message": error}
+        self._record_event(message, url)
+
+        cookies = self._parse_cookies(message.get("cookies"))
+        referrer = str(message.get("referrer") or "")
+        try:
+            download = self.manager.add(
+                url,
+                cookies=cookies,
+                headers={"Referer": referrer} if referrer else None,
+                archive=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - surface archive failures to the extension
+            log.warning("browser_archive_failed", url=url, error=str(exc))
+            return {
+                "type": "archive_error",
+                "message": f"could not start archiving: {exc}",
+            }
+        self.context.events.post(
+            Events.BROWSER_EVENT,
+            {
+                "url": url,
+                "source": message.get("source") or "context_menu",
+                "download_id": download.id,
+                "archive": True,
+            },
+        )
+        return {
+            "type": "archive_ok",
+            "download_id": download.id,
+            "filename": download.filename,
+        }
 
     def _purge_stale_chunks(self) -> None:
         """Drop chunk assemblies that never completed (dropped chunks)."""
@@ -579,6 +670,27 @@ class BrowserManager:
         except Exception:  # noqa: BLE001 - corrupt data becomes a normal download
             return None
 
+    @staticmethod
+    def _is_media_capture(message: dict[str, Any]) -> bool:
+        """True when a capture payload looks like image/video/audio content."""
+        detected = str(message.get("detected_type") or "").strip().lower()
+        if detected in ("image", "video", "audio"):
+            return True
+        mime = str(message.get("mime_type") or "").split(";")[0].strip().lower()
+        if mime.startswith(("image/", "video/", "audio/")):
+            return True
+        for field in ("url", "filename"):
+            root = str(message.get(field) or "").split("?", 1)[0].split("#", 1)[0]
+            if re.search(
+                r"\.(?:png|jpe?g|gif|webp|bmp|svg|tiff|ico|heic|avif|"
+                r"mp4|webm|mkv|mov|avi|flv|m4v|3gp|ts|mpg|mpeg|"
+                r"mp3|wav|ogg|oga|flac|m4a|aac|opus|wma)$",
+                root,
+                re.IGNORECASE,
+            ):
+                return True
+        return False
+
     def _record_event(self, message: dict[str, Any], url: str) -> None:
         try:
             with self.context.session_factory() as session:
@@ -670,7 +782,12 @@ class BrowserManager:
         from magnetoclip.engine.downloader.engine import analyze
         from magnetoclip.network.http.client import ClientConfig, build_client
 
-        client = build_client(ClientConfig(cookies=cookies or {}))
+        client = build_client(
+            ClientConfig(
+                cookies=cookies or {},
+                verify_tls=bool(self.context.settings.get("network.verify_tls", True)),
+            )
+        )
         try:
             return await analyze(
                 client, url, headers=headers or None, timeout=10.0

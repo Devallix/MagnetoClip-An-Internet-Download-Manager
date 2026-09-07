@@ -39,16 +39,10 @@ from ...media.streaming import (
 from ...network.http.client import ClientConfig
 from ...security.safe_names import safe_join, sanitize_filename
 from ...services.logging import get_logger
-from ...torrent.client import TorrentClient, available as torrent_available
-from ...torrent.detect import is_torrent_url, is_magnet_link, is_torrent_file_url
+from ...torrent.client import TorrentClient
+from ...torrent.client import available as torrent_available
+from ...torrent.detect import is_magnet_link, is_torrent_file_url, is_torrent_url
 from ...torrent.handler import TorrentDownloadHandler
-from ...torrent.resume import (
-    TorrentResumeState,
-    has_resume as has_torrent_resume,
-    load_resume as load_torrent_resume,
-    save_resume as save_torrent_resume,
-    sidecar_path_for as torrent_sidecar_path,
-)
 from ...torrent.types import TorrentSpec
 from ..events.bus import Events
 from ..torrent_queue import TorrentQueue
@@ -89,6 +83,7 @@ class DownloadManager:
         client_config = ClientConfig(
             user_agent=str(self.settings.get("network.user_agent", "MagnetoClip/0.1")),
             timeout=float(self.settings.get("network.timeout_seconds", 30)),
+            verify_tls=bool(self.settings.get("network.verify_tls", True)),
         )
         self.core = core or MagnetoCore(bus=context.events, client_config=client_config)
         self.categories = categories or context.categories
@@ -102,6 +97,7 @@ class DownloadManager:
         self._predictor = SpeedPredictor()
         self._etas: dict[int, float | None] = {}
         self._stream_cancel: dict[int, threading.Event] = {}
+        self._paused_by_switch: set[int] = set()
         self._torrent_handlers: dict[int, TorrentDownloadHandler] = {}
         self._pending_torrent_opts: dict[int, dict] = {}
         self._torrent_client: TorrentClient | None = None
@@ -113,6 +109,8 @@ class DownloadManager:
         self.events.connect(Events.CONNECTIONS_UPDATED, self._on_connections)
         self.events.connect(Events.NETWORK_CHANGED, self._on_network_changed)
         self.events.connect(Events.SETTINGS_CHANGED, self._on_settings_changed)
+        self.events.connect(Events.TORRENT_NAME_RESOLVED, self._on_torrent_name_resolved)
+        self.events.connect(Events.PAUSE_STATE_CHANGED, self._on_pause_state_changed)
 
         self._apply_bandwidth()
 
@@ -158,6 +156,7 @@ class DownloadManager:
         auth_password: str | None = None,
         cookies: dict[str, str] | None = None,
         data: bytes | None = None,
+        archive: bool = False,
     ) -> Download:
         """Validate the URL and persist a new download record.
 
@@ -186,6 +185,17 @@ class DownloadManager:
             category = self.categories.classify(name, url)
         target_dir = self._resolve_save_dir(save_dir, category)
         final_path = safe_join(target_dir, name)
+
+        substitute = self._dedup_on_add(
+            url,
+            name,
+            str(final_path),
+            data,
+            category.id if category else None,
+        )
+        if substitute is not None:
+            self.events.post(Events.DOWNLOAD_ADDED, self.snapshot_item(substitute))
+            return substitute
 
         connections = connections_max or int(
             self.settings.get("downloads.connections_per_download", 8)
@@ -233,7 +243,220 @@ class DownloadManager:
                 download.detected_type = detect_type(filename=final_path.name, url=url)
             session.commit()
         self.events.post(Events.DOWNLOAD_ADDED, self.snapshot_item(download))
+        if archive and data is None:
+            download.detected_type = "webpage"
+            download.save_path = str(final_path.parent / f"{Path(name).stem}.html")
+            download.filename = Path(download.save_path).name
+            with self.session_factory() as session:
+                repo = DownloadRepository(session)
+                d = repo.get(download.id)
+                if d is not None:
+                    d.detected_type = "webpage"
+                    d.filename = download.filename
+                    d.save_path = download.save_path
+                    session.commit()
+            self._run_archiving(download.id, url, final_path.parent)
+            return download
         return download
+
+    def _run_archiving(self, download_id: int, url: str, save_dir: Path) -> None:
+        """Archive a webpage URL for the given download (off-thread)."""
+        import threading
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # No running asyncio loop in this thread yet (e.g. a headless or
+            # test caller); run the archive on a dedicated worker thread so the
+            # download is still finalized instead of being left queued forever.
+            threading.Thread(
+                target=asyncio.run,
+                args=(self._archive_async(download_id, url, save_dir),),
+                daemon=True,
+                name="webpage-archive",
+            ).start()
+            return
+        asyncio.create_task(self._archive_async(download_id, url, save_dir))
+
+    async def _archive_async(self, download_id: int, url: str, save_dir: Path) -> None:
+        archiver = getattr(self.context, "archiver", None)
+        if archiver is None:
+            return
+
+        save_dir = Path(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        with self.session_factory() as session:
+            download = DownloadRepository(session).get(download_id)
+            if download is None:
+                return
+            headers = dict(download.headers_json or {})
+            self._post_notification("started", self.snapshot_item(download))
+        result = await asyncio.to_thread(
+            archiver.archive, url, save_dir, headers=headers
+        )
+        with self.session_factory() as session:
+            repo = DownloadRepository(session)
+            download = repo.get(download_id)
+            if download is None:
+                return
+            if result.ok:
+                download.status = DownloadStatus.completed
+                download.save_path = result.path
+                download.filename = Path(result.path).name
+                download.completed_at = datetime.now(UTC)
+                try:
+                    download.size_total = Path(result.path).stat().st_size
+                    download.size_downloaded = download.size_total
+                except OSError:
+                    pass
+            else:
+                download.status = DownloadStatus.failed
+                download.error = result.error or "archive failed"
+            session.commit()
+            snapshot = self.snapshot_item(download)
+        self.events.post(Events.DOWNLOAD_UPDATED, snapshot)
+        self._post_notification(
+            "completed" if result.ok else "failed", snapshot
+        )
+
+    # ----- duplicate detection -----
+
+    def _dedup_on_add(
+        self,
+        url: str,
+        filename: str,
+        save_path: str,
+        data: bytes | None,
+        category_id: int | None,
+    ) -> Download | None:
+        """Resolve a duplicate before creating a new download.
+
+        Returns an existing download to substitute (skip / open-existing) or
+        ``None`` to proceed with a normal new download.
+
+        * For ``data`` (capture) adds the content is known, so we hash it and
+          compare against the index (an exact duplicate).
+        * For URL adds we fall back to checking whether a completed download for
+          the same URL, or the same resolved save path, already exists.
+
+        The interactive "\u201cduplicate detected\u201d" decision is delegated to
+        ``context.dedup_decision`` when present (UI add flows); otherwise the
+        ``dedup.auto_skip`` policy decides. This keeps the method non-blocking
+        for automated/headless paths (captures, remote, tests).
+        """
+        dedup = getattr(self.context, "dedup", None)
+        if dedup is None or not self.settings.get("dedup.enabled", True):
+            return None
+
+        if data is not None:
+            result = dedup.check_bytes(data, filename=filename)
+        else:
+            result = self._find_url_duplicate(url, save_path, filename)
+        if result is None or not result.is_duplicate:
+            return None
+
+        payload = {
+            "filename": filename,
+            "url": url,
+            "save_path": save_path,
+            "existing_path": result.existing_path,
+            "existing_filename": result.existing_filename,
+            "existing_size": result.existing_size,
+            "existing_categories": result.existing_categories,
+        }
+        self.events.post(Events.DUPLICATE_DETECTED, payload)
+
+        decision = self._dedup_decision(payload)
+        if decision == "download":
+            return None
+        # Skip or open-existing: substitute an existing record for the file.
+        return self._existing_download_for(
+            payload, url, filename, save_path, category_id
+        )
+
+    def _dedup_decision(self, payload: dict) -> str:
+        """Decide the duplicate action: ``download``, ``skip``, or ``open``.
+
+        When ``dedup.auto_skip`` is set we never prompt (automated path).
+        Otherwise a UI decision hook (set by interactive add flows) is given
+        the chance to show the ``DuplicateResultDialog``; if no hook is present
+        we simply proceed with the download.
+        """
+        if self.settings.get("dedup.auto_skip", False):
+            return "skip"
+        hook = getattr(self.context, "dedup_decision", None)
+        if hook is not None and callable(hook):
+            try:
+                return str(hook(payload) or "download")
+            except Exception:
+                return "download"
+        return "download"
+
+    def _find_url_duplicate(
+        self,
+        url: str,
+        save_path: str,
+        filename: str,
+    ) -> Any | None:
+        from ...core.dedup.types import DuplicateResult
+
+        with self.session_factory() as session:
+            repo = DownloadRepository(session)
+            # A completed download already at the target path.
+            if Path(save_path).is_file():
+                return DuplicateResult(
+                    is_duplicate=True,
+                    size_match=True,
+                    existing_path=save_path,
+                    existing_filename=filename,
+                )
+            # A completed download for the same URL.
+            for existing in repo.list(status=DownloadStatus.completed, limit=2000):
+                if existing.url == url:
+                    return DuplicateResult(
+                        is_duplicate=True,
+                        size_match=True,
+                        existing_path=existing.save_path,
+                        existing_filename=existing.filename,
+                    )
+        return None
+
+    def _existing_download_for(
+        self,
+        payload: dict,
+        url: str,
+        filename: str,
+        save_path: str,
+        category_id: int | None,
+    ) -> Download:
+        """Find an existing completed ``Download`` row for the duplicated file,
+        creating one pointing at the already-present file if none exists."""
+        existing_path = payload.get("existing_path") or save_path
+        with self.session_factory() as session:
+            repo = DownloadRepository(session)
+            for existing in repo.list(limit=2000):
+                if existing.save_path and Path(existing.save_path) == Path(
+                    existing_path
+                ):
+                    return existing
+            # No row yet: create a completed record that references the file.
+            size = payload.get("existing_size") or 0
+            try:
+                size = Path(existing_path).stat().st_size
+            except OSError:
+                pass
+            download = repo.add(
+                url,
+                filename=filename,
+                save_path=str(existing_path),
+                category_id=category_id,
+            )
+            download.status = DownloadStatus.completed
+            download.size_total = size
+            download.size_downloaded = size
+            download.completed_at = datetime.now(UTC)
+            session.commit()
+            return download
 
     # ----- lifecycle -----
 
@@ -470,6 +693,35 @@ class DownloadManager:
         for download in downloads:
             if download.status in (DownloadStatus.queued, DownloadStatus.scheduled):
                 self.start(download.id)
+
+    def _on_pause_state_changed(self, payload) -> None:
+        """Pause or resume every download when the global switch flips."""
+        if payload.get("paused"):
+            self.pause_all()
+        else:
+            self.resume_all()
+
+    def pause_all(self) -> None:
+        """Pause every running or waiting download (toggled by the switch)."""
+        with self.session_factory() as session:
+            downloads = DownloadRepository(session).list(limit=2000)
+        for download in downloads:
+            if download.status in ACTIVE_STATUSES or download.status in (
+                DownloadStatus.queued,
+                DownloadStatus.scheduled,
+            ):
+                self._paused_by_switch.add(download.id)
+                self.pause(download.id)
+
+    def resume_all(self) -> None:
+        """Resume the downloads that were paused by :meth:`pause_all`."""
+        download_ids = list(self._paused_by_switch)
+        self._paused_by_switch.clear()
+        for download_id in download_ids:
+            try:
+                self.resume(download_id)
+            except Exception:  # noqa: BLE001
+                log.warning("resume_all_failed", id=download_id, exc_info=True)
 
     # ----- execution -----
 
@@ -778,7 +1030,9 @@ class DownloadManager:
 
         local_path = Path(url) if url else Path()
         if is_torrent_file_url(url) and not local_path.is_file():
-            torrent_path = self._download_torrent_file(url, save_dir)
+            torrent_path = self._download_torrent_file(
+                url, save_dir, target=self._torrent_meta_target(download)
+            )
             return TorrentSpec(
                 download_id=download.id,
                 save_dir=save_dir,
@@ -800,7 +1054,9 @@ class DownloadManager:
 
         lower = url.strip().lower()
         if lower.startswith(("http://", "https://")):
-            torrent_path = self._download_torrent_file(url, save_dir)
+            torrent_path = self._download_torrent_file(
+                url, save_dir, target=self._torrent_meta_target(download)
+            )
             return TorrentSpec(
                 download_id=download.id,
                 save_dir=save_dir,
@@ -819,12 +1075,32 @@ class DownloadManager:
             seed_mode=seed,
         )
 
-    def _download_torrent_file(self, url: str, dest_dir: Path) -> Path:
-        """Download a .torrent file from *url* into *dest_dir* and return the path."""
+    @staticmethod
+    def _torrent_meta_target(download) -> Path | None:
+        """Return the on-disk path where the .torrent metadata should live.
+
+        The download record's ``save_path`` is the promised .torrent location,
+        so the metadata file is written there to keep the record and the
+        filesystem in sync (and allow the completed download to be previewed).
+        """
+        save_path = getattr(download, "save_path", None)
+        if save_path and str(save_path).lower().endswith(".torrent"):
+            return Path(save_path)
+        return None
+
+    def _download_torrent_file(
+        self, url: str, dest_dir: Path, *, target: Path | None = None
+    ) -> Path:
+        """Download a .torrent file from *url* and return its on-disk path.
+
+        When *target* is given (the download's ``save_path``), the metadata is
+        written there so completed torrent downloads can be previewed from the
+        downloads page; otherwise a seeded temp name is used.
+        """
         import uuid
 
         dest_dir.mkdir(parents=True, exist_ok=True)
-        torrent_path = dest_dir / f".torrent_{uuid.uuid4().hex[:12]}.tmp"
+        torrent_path = target or dest_dir / f".torrent_{uuid.uuid4().hex[:12]}.tmp"
         with httpx.Client(follow_redirects=True, timeout=30) as client:
             resp = client.get(url)
             resp.raise_for_status()
@@ -891,6 +1167,7 @@ class DownloadManager:
                 download.size_total = task.state.total_size or download.size_total
                 download.hash_calculated = task.state.hash_calculated
                 download.completed_at = _now()
+                self._reconcile_final_path(download, task)
                 self._inspect_media_async(download_id)
             elif result == "verification_failed":
                 download.status = DownloadStatus.verification_failed
@@ -908,10 +1185,75 @@ class DownloadManager:
         self.events.post(Events.DOWNLOAD_UPDATED, snapshot)
         self.torrent_queue.admit_and_advance()
         self._post_notification(result, snapshot)
+        if result == "completed":
+            self._index_dedup_async(download_id)
+
+    def _index_dedup_async(self, download_id: int) -> None:
+        """Index a completed download's file in the dedup index (off-thread)."""
+        dedup = getattr(self.context, "dedup", None)
+        if dedup is None:
+            return
+        try:
+            asyncio.create_task(self._index_dedup(download_id))
+        except RuntimeError:
+            pass
+
+    async def _index_dedup(self, download_id: int) -> None:
+        dedup = getattr(self.context, "dedup", None)
+        if dedup is None:
+            return
+        with self.session_factory() as session:
+            download = DownloadRepository(session).get(download_id)
+            if download is None or not download.save_path:
+                return
+            path = download.save_path
+            filename = download.filename or Path(path).name
+            category_id = download.category_id
+        duplicate = await asyncio.to_thread(
+            dedup.index_file_and_check, path, filename, category_id
+        )
+        if duplicate is not None and duplicate.is_duplicate:
+            self.events.post(
+                Events.DUPLICATE_DETECTED,
+                {
+                    "filename": filename,
+                    "url": "",
+                    "save_path": path,
+                    "existing_path": duplicate.existing_path,
+                    "existing_filename": duplicate.existing_filename,
+                },
+            )
+
+    def _index_single(self, path: str, filename: str, category_id, algo: str) -> bool:
+        raise NotImplementedError  # replaced by DedupManager.index_file_and_check
+
+    @staticmethod
+    def _reconcile_final_path(download, task) -> None:
+        """Persist the true on-disk filename if the engine adjusted it.
+
+        The engine may append an extension derived from the response
+        Content-Type when the URL gave no filename (e.g. Google's
+        extensionless ``encrypted-tbn0.gstatic.com`` image thumbnails). Keep the
+        download record's filename/save_path in sync with where the file was
+        actually written so the UI list and the filesystem agree.
+        """
+        final = getattr(task.spec, "final_path", None)
+        if final is None:
+            return
+        final_path = Path(final)
+        if str(final_path) == (download.save_path or "") and final_path.name == (
+            download.filename or ""
+        ):
+            return
+        download.filename = final_path.name
+        download.save_path = str(final_path)
 
     def _post_notification(self, result: str | None, snapshot: dict) -> None:
         title = snapshot.get("filename") or f"Download #{snapshot.get('id')}"
-        if result == "completed":
+        if result == "started":
+            kind = "started"
+            body = "Download started"
+        elif result == "completed":
             kind = "completed"
             body = "Download complete"
         elif result == "verification_failed":
@@ -929,6 +1271,7 @@ class DownloadManager:
                 "title": title,
                 "body": body,
                 "download_id": snapshot.get("id"),
+                "save_path": snapshot.get("save_path"),
             },
         )
 
@@ -1000,6 +1343,7 @@ class DownloadManager:
             download = repo.get(payload["id"])
             if download is None:
                 return
+            first_start = download.started_at is None and "started_at" in fields
             if download.started_at is not None and "started_at" in fields:
                 del fields["started_at"]
             for key, value in fields.items():
@@ -1008,6 +1352,8 @@ class DownloadManager:
             session.commit()
             snapshot = self.snapshot_item(download)
         self.events.post(Events.DOWNLOAD_UPDATED, snapshot)
+        if status is DownloadStatus.downloading and first_start:
+            self._post_notification("started", snapshot)
 
     def _on_progress(self, payload: dict) -> None:
         now = time.monotonic()
@@ -1052,6 +1398,55 @@ class DownloadManager:
             download.connections_active = int(payload.get("active") or 0)
             download.connections_max = int(payload.get("max") or download.connections_max)
             session.commit()
+
+    def _on_torrent_name_resolved(self, payload: Any) -> None:
+        """Persist the real torrent title once libtorrent learns it.
+
+        Magnets without a ``dn=`` display name are stored with a 'magnet_'
+        placeholder at add-time. When the actual torrent name arrives from the
+        swarm we adopt it as the filename (which the UI Name column reflects)
+        and refresh the torrent's info hash if we didn't have it.
+        """
+        if not isinstance(payload, dict):
+            return
+        download_id = payload.get("id")
+        filename = (payload.get("filename") or "").strip()
+        if not download_id or not filename:
+            return
+        name = sanitize_filename(filename)
+        if not name:
+            return
+        info_hash = (payload.get("info_hash") or "").strip()
+        with self.session_factory() as session:
+            repo = DownloadRepository(session)
+            download = repo.get(download_id)
+            if download is None:
+                return
+            if download.filename and not self._looks_like_placeholder(
+                download.filename
+            ):
+                # A real name was already set (e.g. from a .torrent file or a
+                # magnet dn=); keep it rather than overwriting.
+                return
+            download.filename = name
+            if info_hash and (
+                not download.torrent_info_hash
+                or download.torrent_info_hash == ""
+            ):
+                download.torrent_info_hash = info_hash
+            session.commit()
+            snapshot = self.snapshot_item(download)
+        self.events.post(Events.DOWNLOAD_UPDATED, snapshot)
+
+    @staticmethod
+    def _looks_like_placeholder(filename: str) -> bool:
+        """True if *filename* looks like the URL-derived 'magnet' placeholder."""
+        lowered = (filename or "").strip().lower()
+        return (
+            lowered in ("magnet", "magnet_", "download")
+            or lowered.startswith("magnet:")
+            or lowered.startswith("magnet_")
+        )
 
     def _on_network_changed(self, payload) -> None:
         override = None

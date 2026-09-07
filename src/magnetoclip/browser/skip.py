@@ -19,8 +19,20 @@ _PERSISTENT_UNTIL = datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
 
 
 def skip_all_until(context) -> datetime | None:
-    """Return the configured skip-all deadline, or None if disabled."""
-    raw = context.settings.get(SETTING_KEY, "")
+    """Return the configured skip-all deadline, or None if disabled.
+
+    The value is read from the ``settings`` table (the single source of truth)
+    rather than the in-memory snapshot: the native-messaging host runs as a
+    separate process and would otherwise keep auto-rejecting captures after the
+    app cleared the flag.
+    """
+    from magnetoclip.database.repositories import SettingsStore
+
+    try:
+        stored = SettingsStore(context.session_factory).load_all()
+        raw = stored.get(SETTING_KEY, "")
+    except Exception:  # noqa: BLE001 - fall back to the snapshot on DB failure
+        raw = context.settings.get(SETTING_KEY, "")
     if not raw:
         return None
     try:

@@ -131,6 +131,12 @@ QFrame#card {
     border-radius: 12px;
 }
 
+QWidget#completion_card {
+    background-color: $surface;
+    border: 1px solid $accent;
+    border-radius: 12px;
+}
+
 QFrame#stat_card {
     background-color: $surface;
     border: 1px solid $border;
@@ -295,15 +301,15 @@ QCheckBox::indicator:checked {
 QProgressBar {
     background-color: $surface_alt;
     border: none;
-    border-radius: 4px;
-    height: 8px;
+    border-radius: 2px;
+    height: 4px;
     text-align: center;
     color: transparent;
 }
 
 QProgressBar::chunk {
     background-color: $accent;
-    border-radius: 4px;
+    border-radius: 2px;
 }
 
 QProgressBar::chunk[state="completed"] {
@@ -720,4 +726,61 @@ QPushButton[role="activation_secondary"]:hover {
     color: $text;
     background-color: $surface_alt;
     border-color: $text_muted;
+}
+
+QScrollArea#recent_scroll {
+    background-color: $surface;
+}
+
+QScrollArea#recent_scroll > QWidget {
+    background-color: $surface;
+}
+
+QWidget#recent_container {
+    background-color: $surface;
+}
+
+
+QMenuBar {
+    background-color: $surface;
+    color: $text;
+    border-bottom: 1px solid $border;
+}
+
+QMenuBar::item {
+    background-color: transparent;
+    color: $text;
+    padding: 5px 12px;
+}
+
+QMenuBar::item:selected {
+    background-color: $surface_alt;
+}
+
+QMenu {
+    background-color: $surface;
+    color: $text;
+    border: 1px solid $border;
+    padding: 4px;
+}
+
+QMenu::item {
+    background-color: transparent;
+    color: $text;
+    padding: 6px 24px;
+}
+
+QMenu::item:selected {
+    background-color: $accent;
+    color: #FFFFFF;
+}
+
+QMenu::item:disabled {
+    color: $text_muted;
+}
+
+QMenu::separator {
+    height: 1px;
+    background-color: $border;
+    margin: 4px 8px;
 }

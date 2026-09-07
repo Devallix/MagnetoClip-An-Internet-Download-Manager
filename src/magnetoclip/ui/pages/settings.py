@@ -201,6 +201,89 @@ class SettingsPage(Page):
         form.addRow("User agent", self.user_agent_edit)
         cl.addLayout(form)
 
+        self.verify_tls_check = _check(
+            "Verify TLS certificates for downloads",
+            "Uncheck only if a VPN, proxy, or antivirus interferes with HTTPS "
+            "downloads (allows self-signed / mismatched certificates)",
+        )
+        cl.addWidget(self.verify_tls_check)
+
+        layout.addWidget(card)
+
+        # ── section: Duplicate Detection ──────────────────────────────────────
+        card, cl = _card("Duplicate Detection")
+        self.dedup_enabled_check = _check(
+            "Detect files you have already downloaded",
+            "Warns before re-downloading a file whose content is already on disk.",
+        )
+        self.dedup_auto_skip_check = _check(
+            "Skip duplicates automatically without asking"
+        )
+        self.dedup_index_check = _check(
+            "Index files after a download completes",
+            "Builds the content-hash index used to spot duplicates.",
+        )
+        cl.addWidget(self.dedup_enabled_check)
+        cl.addWidget(self.dedup_auto_skip_check)
+        cl.addWidget(self.dedup_index_check)
+
+        dedup_row = QHBoxLayout()
+        self.dedup_scan_button = QPushButton("Scan Downloads Folder")
+        self.dedup_scan_button.clicked.connect(self._on_dedup_scan)
+        self.dedup_stats_label = QLabel("")
+        self.dedup_stats_label.setObjectName("card_caption")
+        dedup_row.addWidget(self.dedup_scan_button)
+        dedup_row.addWidget(self.dedup_stats_label, 1)
+        cl.addLayout(dedup_row)
+        layout.addWidget(card)
+
+        # ── section: Network Speed Test ──────────────────────────────────────
+        card, cl = _card("Network Speed Test")
+        self.speedtest_enabled_check = _check(
+            "Enable built-in network speed tests"
+        )
+        self.speedtest_auto_check = _check("Run speed tests automatically")
+        cl.addWidget(self.speedtest_enabled_check)
+        cl.addWidget(self.speedtest_auto_check)
+        speed_row = QHBoxLayout()
+        speed_row.setSpacing(8)
+        speed_row.addWidget(QLabel("Test size"))
+        self.speedtest_size_spin = _spin(1, 500, "MB")
+        speed_row.addWidget(self.speedtest_size_spin)
+        speed_row.addWidget(QLabel("Interval"))
+        self.speedtest_interval_spin = _spin(1, 168, "h")
+        speed_row.addWidget(self.speedtest_interval_spin)
+        speed_row.addStretch(1)
+        cl.addLayout(speed_row)
+        layout.addWidget(card)
+
+        # ── section: File Preview ────────────────────────────────────────────
+        card, cl = _card("Built-in File Preview")
+        self.preview_enabled_check = _check(
+            "Enable in-app file preview for images and text"
+        )
+        cl.addWidget(self.preview_enabled_check)
+        layout.addWidget(card)
+
+        # ── section: Webpage Archiver ────────────────────────────────────────
+        card, cl = _card("Webpage Archiver")
+        self.archiver_enabled_check = _check(
+            "Save webpages as self-contained offline HTML"
+        )
+        self.archiver_images_check = _check("Inline images as base64")
+        self.archiver_css_check = _check("Inline CSS")
+        self.archiver_js_check = _check("Inline JavaScript")
+        cl.addWidget(self.archiver_enabled_check)
+        cl.addWidget(self.archiver_images_check)
+        cl.addWidget(self.archiver_css_check)
+        cl.addWidget(self.archiver_js_check)
+        arch_row = QHBoxLayout()
+        arch_row.setSpacing(8)
+        arch_row.addWidget(QLabel("Max resource size"))
+        self.archiver_size_spin = _spin(1, 100, "MB")
+        arch_row.addWidget(self.archiver_size_spin)
+        arch_row.addStretch(1)
+        cl.addLayout(arch_row)
         layout.addWidget(card)
 
         # ── section: Browser & Capture ───────────────────────────────────────
@@ -488,6 +571,27 @@ class SettingsPage(Page):
         self.user_agent_edit.setText(str(s.get("network.user_agent", "")))
         self.timeout_spin.setValue(int(s.get("network.timeout_seconds", 30)))
         self.retry_spin.setValue(int(s.get("network.retry_max", 5)))
+        self.verify_tls_check.setChecked(bool(s.get("network.verify_tls", True)))
+        self.dedup_enabled_check.setChecked(bool(s.get("dedup.enabled", True)))
+        self.dedup_auto_skip_check.setChecked(bool(s.get("dedup.auto_skip", False)))
+        self.dedup_index_check.setChecked(
+            bool(s.get("dedup.index_after_download", True))
+        )
+        self._refresh_dedup_stats()
+        self.speedtest_enabled_check.setChecked(bool(s.get("speedtest.enabled", True)))
+        self.speedtest_auto_check.setChecked(
+            bool(s.get("speedtest.auto_test_enabled", False))
+        )
+        self.speedtest_size_spin.setValue(int(s.get("speedtest.test_size_mb", 25)))
+        self.speedtest_interval_spin.setValue(
+            int(s.get("speedtest.auto_test_interval_hours", 12))
+        )
+        self.preview_enabled_check.setChecked(bool(s.get("preview.enabled", True)))
+        self.archiver_enabled_check.setChecked(bool(s.get("archiver.enabled", True)))
+        self.archiver_images_check.setChecked(bool(s.get("archiver.inline_images", True)))
+        self.archiver_css_check.setChecked(bool(s.get("archiver.inline_css", True)))
+        self.archiver_js_check.setChecked(bool(s.get("archiver.inline_js", False)))
+        self.archiver_size_spin.setValue(int(s.get("archiver.max_resource_size", 5)))
         self.directory_edit.setText(str(s.get("downloads.default_directory", "")))
         self.theme_combo.setCurrentText(str(s.get("appearance.theme", "dark")))
         self.startup_check.setChecked(bool(s.get("general.startup", True)))
@@ -532,6 +636,59 @@ class SettingsPage(Page):
         self.remote_port_spin.setValue(int(s.get("remote.port", 8477)))
         self._refresh_remote_status()
         self._refresh_license_labels()
+
+    def _refresh_dedup_stats(self) -> None:
+        dedup = getattr(self.context, "dedup", None)
+        if dedup is None:
+            self.dedup_stats_label.setText("")
+            return
+        stats = dedup.stats()
+        self.dedup_stats_label.setText(
+            f"{stats.indexed_files} files indexed  \u2022  "
+            f"{stats.size_groups} size groups"
+        )
+
+    def _on_dedup_scan(self) -> None:
+        import threading
+
+        target = Path(self.directory_edit.text().strip()) if self.directory_edit.text().strip() else None
+        if target is None or not target.is_dir():
+            QMessageBox.information(
+                self,
+                "Scan Downloads Folder",
+                "Choose a valid default download folder first.",
+            )
+            return
+        dedup = getattr(self.context, "dedup", None)
+        if dedup is None:
+            return
+        self.dedup_scan_button.setEnabled(False)
+        self.dedup_scan_button.setText("Scanning\u2026")
+        threading.Thread(
+            target=lambda: self._run_dedup_scan(dedup, target), daemon=True
+        ).start()
+
+    def _run_dedup_scan(self, dedup, path: Path) -> None:
+        import asyncio
+
+        try:
+            added = asyncio.run(dedup.scan_directory(path))
+            QTimer.singleShot(0, lambda: self._dedup_scan_done(added))
+        except Exception as exc:  # noqa: BLE001 - scan is best-effort
+            error_msg = str(exc)
+            QTimer.singleShot(0, lambda: self._dedup_scan_done(0, error=error_msg))
+
+    def _dedup_scan_done(self, added: int, error: str | None = None) -> None:
+        self.dedup_scan_button.setEnabled(True)
+        self.dedup_scan_button.setText("Scan Downloads Folder")
+        if error:
+            QMessageBox.warning(self, "Scan Downloads Folder", error)
+        else:
+            QMessageBox.information(
+                self, "Scan Downloads Folder", f"Indexed {added} new file(s)."
+            )
+        self._refresh_dedup_stats()
+        self.context.events.post(Events.DEDUP_INDEXED, {})
 
     def _refresh_license_labels(self) -> None:
         from magnetoclip.services.licensing.state import (
@@ -928,6 +1085,26 @@ class SettingsPage(Page):
         s.set("network.user_agent", self.user_agent_edit.text())
         s.set("network.timeout_seconds", self.timeout_spin.value())
         s.set("network.retry_max", self.retry_spin.value())
+        s.set("network.verify_tls", self.verify_tls_check.isChecked())
+        s.set("dedup.enabled", self.dedup_enabled_check.isChecked())
+        s.set("dedup.auto_skip", self.dedup_auto_skip_check.isChecked())
+        s.set("dedup.index_after_download", self.dedup_index_check.isChecked())
+        s.set("speedtest.enabled", self.speedtest_enabled_check.isChecked())
+        s.set(
+            "speedtest.auto_test_enabled",
+            self.speedtest_auto_check.isChecked(),
+        )
+        s.set("speedtest.test_size_mb", self.speedtest_size_spin.value())
+        s.set(
+            "speedtest.auto_test_interval_hours",
+            self.speedtest_interval_spin.value(),
+        )
+        s.set("preview.enabled", self.preview_enabled_check.isChecked())
+        s.set("archiver.enabled", self.archiver_enabled_check.isChecked())
+        s.set("archiver.inline_images", self.archiver_images_check.isChecked())
+        s.set("archiver.inline_css", self.archiver_css_check.isChecked())
+        s.set("archiver.inline_js", self.archiver_js_check.isChecked())
+        s.set("archiver.max_resource_size", self.archiver_size_spin.value())
         s.set("downloads.default_directory", self.directory_edit.text())
         s.set("appearance.theme", self.theme_combo.currentText())
         s.set("general.startup", self.startup_check.isChecked())

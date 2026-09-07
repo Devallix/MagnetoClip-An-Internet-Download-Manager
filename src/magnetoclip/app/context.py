@@ -32,6 +32,11 @@ class AppContext:
     browser: object = None
     torrent_client: object = None
     remote: object = None
+    dedup: object = None
+    pauses: object = None
+    speedtest: object = None
+    archiver: object = None
+    preview: object = None
 
     def __post_init__(self) -> None:
         self.session_factory = self.database.Session
@@ -70,6 +75,18 @@ class AppContext:
                 await manager.shutdown()
             except Exception:
                 log.warning("manager_shutdown_failed", exc_info=True)
+        pauses = getattr(self, "pauses", None)
+        if pauses is not None:
+            try:
+                pauses.close()
+            except Exception:
+                log.warning("pauses_shutdown_failed", exc_info=True)
+        speedtest = getattr(self, "speedtest", None)
+        if speedtest is not None:
+            try:
+                speedtest.close()
+            except Exception:
+                log.warning("speedtest_shutdown_failed", exc_info=True)
         self.database.close()
         from magnetoclip.services.logging.setup import shutdown_logging
 

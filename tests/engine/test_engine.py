@@ -430,3 +430,59 @@ async def test_set_priority_reallocates_bandwidth(tmp_path):
         assert tasks[2].limiter.rate == pytest.approx(120.0)
     finally:
         await core.shutdown()
+
+from magnetoclip.engine.downloader.engine import RemoteFileInfo, DownloadTask
+
+
+def _task(tmp_path, filename):
+    spec = spec_from_url(
+        download_id=9,
+        url="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcR",
+        save_dir=tmp_path,
+        filename=filename,
+        connections_max=1,
+    )
+    return spec
+
+
+def test_derive_extension_adds_jpg_for_extensionless_image(tmp_path):
+    spec = _task(tmp_path, "images")
+    task = object.__new__(DownloadTask)
+    task.spec = spec
+    info = RemoteFileInfo(
+        total_size=1234,
+        supports_ranges=False,
+        content_type="image/jpeg",
+        content_disposition_filename=None,
+    )
+    task._derive_extension_from_content_type(info)
+    assert spec.filename == "images.jpg"
+    assert spec.final_path.name == "images.jpg"
+
+
+def test_derive_extension_keeps_existing_extension(tmp_path):
+    spec = _task(tmp_path, "photo.png")
+    task = object.__new__(DownloadTask)
+    task.spec = spec
+    info = RemoteFileInfo(
+        total_size=1234,
+        supports_ranges=False,
+        content_type="image/png",
+        content_disposition_filename=None,
+    )
+    task._derive_extension_from_content_type(info)
+    assert spec.filename == "photo.png"
+
+
+def test_derive_extension_skips_unknown_content_type(tmp_path):
+    spec = _task(tmp_path, "blob")
+    task = object.__new__(DownloadTask)
+    task.spec = spec
+    info = RemoteFileInfo(
+        total_size=1234,
+        supports_ranges=False,
+        content_type="application/octet-stream",
+        content_disposition_filename=None,
+    )
+    task._derive_extension_from_content_type(info)
+    assert spec.filename == "blob"

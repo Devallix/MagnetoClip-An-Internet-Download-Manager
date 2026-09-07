@@ -10,7 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
@@ -28,8 +29,8 @@ from PySide6.QtWidgets import (
 
 from magnetoclip.core.events.bus import Events
 
-from ..components.buttons import VerticalIconButton
-from ..components.icons import tool_icon
+from ..components.buttons import GhostButton, VerticalIconButton
+from ..components.icons import text_icon, tool_icon
 from ..dialogs.add_torrent import AddTorrentDialog
 from ..util import format_bytes, format_speed
 from .base import Page
@@ -58,7 +59,7 @@ class TorrentsPage(Page):
         outer.addWidget(active_label)
 
         toolbar = QHBoxLayout()
-        self.add_button = VerticalIconButton(tool_icon("add"), "Add")
+        self.add_button = VerticalIconButton(text_icon("T"), "Add")
         self.add_button.setObjectName("tool_button")
         self.add_button.setProperty("tint", "add")
         self.add_button.clicked.connect(self._on_add_clicked)
@@ -126,6 +127,54 @@ class TorrentsPage(Page):
         self.table.setColumnWidth(5, 80)
         outer.addWidget(self.table, 1)
 
+        # --- Torrent site links ---
+        sites_label = QLabel("Torrent Sites")
+        sites_label.setObjectName("page_subtitle")
+        outer.addWidget(sites_label)
+
+        sites_row = QHBoxLayout()
+        sites_row.setSpacing(8)
+        self._sites = [
+            (
+                "YTS",
+                "https://web.yts.gg/",
+                "Download torrent movies in HD",
+            ),
+            (
+                "EZTV",
+                "https://en.eztv-official.is/",
+                "Download torrent movies and TV shows",
+            ),
+            (
+                "The Pirate Bay",
+                "https://thepiratebay.org/",
+                "Download torrent files: movies, apps, documents, music and more",
+            ),
+            (
+                "1337x",
+                "https://www.1377x.to/",
+                "Download torrent files: movies, apps, documents, music and more",
+            ),
+        ]
+        for title, url, description in self._sites:
+            button = GhostButton(title)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setToolTip(f"{description}\n{url}")
+            button.clicked.connect(
+                lambda checked=False, site_url=url: self._open_site(site_url)
+            )
+            sites_row.addWidget(button)
+        sites_row.addStretch(1)
+        outer.addLayout(sites_row)
+
+        sites_note = QLabel(
+            "Open a site to browse torrents, then add a magnet link or .torrent "
+            "file with the buttons above."
+        )
+        sites_note.setObjectName("card_caption")
+        sites_note.setWordWrap(True)
+        outer.addWidget(sites_note)
+
         events = context.events
         events.connect(Events.DOWNLOAD_ADDED, self._on_added)
         events.connect(Events.DOWNLOAD_UPDATED, self._on_updated)
@@ -133,6 +182,12 @@ class TorrentsPage(Page):
         events.connect(Events.PROGRESS_UPDATED, self._on_progress)
 
         self.refresh()
+
+    # ----- torrent site links -----
+
+    @staticmethod
+    def _open_site(url: str) -> None:
+        QDesktopServices.openUrl(QUrl(url))
 
     # ----- add routing -----
 

@@ -28,9 +28,21 @@ let nextId = 1;
 let integrationEnabled = true;
 let captureEnabled = true;
 let defaultDownloader = false;
+// The flags above only become authoritative once the app's native host answers
+// a settings request ("settings_ok"): the app is the single source of truth for
+// its settings. Until then the defaults here are guesses. Downloads must never
+// be dropped on those guesses in onCreated — the app answers capture_skipped
+// for anything it does not want, so the browser simply keeps the file. Trusting
+// the cached chrome.storage copy instead is what let MagnetoClip miss non-media
+// files after 'default downloader' was toggled on while this worker slept.
+let settingsLoaded = false;
 
+// Warm-start the flags from the last state we know. This is a best guess only:
+// it never makes the flags authoritative, and it never overwrites values the
+// host already confirmed this run (the cached snapshot can be stale if the app
+// settings changed while this worker was asleep).
 function loadStoredSettings() {
-  if (!chrome.storage) {
+  if (!chrome.storage || settingsLoaded) {
     return;
   }
   chrome.storage.local.get(SETTINGS_STORAGE_KEY, (stored) => {
@@ -38,7 +50,7 @@ function loadStoredSettings() {
       return;
     }
     const saved = stored && stored[SETTINGS_STORAGE_KEY];
-    if (!saved) {
+    if (!saved || settingsLoaded) {
       return;
     }
     if (typeof saved.integration_enabled === "boolean") {
@@ -67,10 +79,11 @@ function saveSettingsToStorage() {
 }
 
 const MENU_ITEMS = [
-  { id: "mc_download_link", title: "Download with MagnetoClip", contexts: ["link"] },
+  { id: "mc_download_link", title: "Download link with MagnetoClip", contexts: ["link"] },
   { id: "mc_download_video", title: "Download video with MagnetoClip", contexts: ["video"] },
   { id: "mc_download_audio", title: "Download audio with MagnetoClip", contexts: ["audio"] },
-  { id: "mc_download_image", title: "Download image with MagnetoClip", contexts: ["image"] }
+  { id: "mc_download_image", title: "Download image with MagnetoClip", contexts: ["image"] },
+  { id: "mc_archive_page", title: "Archive this page with MagnetoClip", contexts: ["page"] }
 ];
 
 function ensurePort() {
@@ -87,6 +100,7 @@ function ensurePort() {
         integrationEnabled = message.integration_enabled !== false;
         captureEnabled = message.capture_enabled !== false;
         defaultDownloader = message.default_downloader === true;
+        settingsLoaded = true;
         saveSettingsToStorage();
       }
       if (
@@ -114,7 +128,9 @@ function ensurePort() {
             message.type === "capture_ok" ||
             message.type === "capture_pending"
           ) {
-            chrome.downloads.cancel(downloadId, () => {});
+            chrome.downloads.cancel(downloadId, () => {
+              chrome.downloads.removeFile(downloadId, () => {});
+            });
           }
         }
       }
@@ -316,6 +332,18 @@ function guessFilename(url) {
         return base + "." + ext;
       }
     }
+    // Extensionless image CDNs (Google thumbnail host, etc.) serve real image
+    // bytes with no filename hint in the URL. Give them a default name so we
+    // don't save an empty-extension file; the app derives the exact type from
+    // the response Content-Type on download.
+    if (isExtensionlessImageHost(url)) {
+      const base = name && name.length <= 40 ? name : "gstatic-image";
+      try {
+        return decodeURIComponent(base) + ".jpg";
+      } catch (error) {
+        return base + ".jpg";
+      }
+    }
     return "";
   }
   try {
@@ -323,6 +351,23 @@ function guessFilename(url) {
   } catch (error) {
     return name;
   }
+}
+
+// Google's image thumbnail hosts serve real image bytes from extensionless
+// URLs (e.g. `encrypted-tbn0.gstatic.com/images?q=tbn:...`). When a capture
+// points at one of these, we hand the app a .jpg default name instead of an
+// empty-extension filename; the exact type is derived from Content-Type when
+// the file downloads.
+function isExtensionlessImageHost(url) {
+  let host;
+  try {
+    host = new URL(url).hostname;
+  } catch (error) {
+    host = url.split("/")[2] || "";
+  }
+  return /(?:^|\.)(?:encrypted-tbn\d*|lh\d+|yt\d+|ytimg|ggpht)\.(?:gstatic|googleusercontent|ggpht)\.com$/i.test(
+    host
+  );
 }
 
 function detectFileType(url) {
@@ -409,6 +454,24 @@ function capture(payload) {
   return withCookies(payload).then((full) => request("capture", full));
 }
 
+// Ask MagnetoClip to fetch and inline a page into a self-contained offline
+// .html file. The archiver runs entirely in the app (server-side fetch), so
+// this only needs the page URL; the page's cookies are passed along so the
+// archiver can see session-gated content, and the tab title becomes a friendly
+// default filename hint on the app side.
+function archivePage(url, pageUrl) {
+  return getCookiesFor(url).then((cookies) => {
+    const payload = { url: url, source: "context_menu", detected_type: "webpage" };
+    if (cookies) {
+      payload.cookies = cookies;
+    }
+    if (pageUrl) {
+      payload.referrer = pageUrl;
+    }
+    return request("archive", payload);
+  });
+}
+
 function ensureMenus() {
   chrome.contextMenus.removeAll(() => {
     for (const item of MENU_ITEMS) {
@@ -455,7 +518,23 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
-  const url = info.linkUrl || info.srcUrl || "";
+  if (info.menuItemId === "mc_archive_page") {
+    // Archive the current page as a self-contained HTML file.
+    const pageUrl = info.pageUrl || (tab && tab.url) || "";
+    if (!/^https?:/i.test(pageUrl)) {
+      notify("MagnetoClip", "Only http:// and https:// pages can be archived.");
+      return;
+    }
+    archivePage(pageUrl, tab && tab.url ? tab.url : "")
+      .catch((error) => {
+        notify("MagnetoClip unavailable", error.message);
+      });
+    return;
+  }
+  // For media (image/video/audio) the actual resource is srcUrl; a wrapping
+  // link (linkUrl) is usually just an info/description page. Prefer srcUrl so
+  // we capture the media file itself rather than the enclosing page.
+  const url = info.srcUrl || info.linkUrl || "";
   if (!/^https?:/i.test(url)) {
     return;
   }
@@ -518,6 +597,125 @@ function sendCapture(item, filename) {
     });
 }
 
+function detectMediaType(filename) {
+  const ext = String(filename || "").split(".").pop().toLowerCase();
+  if (["mp3", "wav", "ogg", "flac", "m4a", "aac", "opus", "wma"].includes(ext)) {
+    return "audio";
+  }
+  if (["mp4", "webm", "mkv", "mov", "avi", "flv", "m4v", "3gp", "ts", "mpg", "mpeg"].includes(ext)) {
+    return "video";
+  }
+  if (["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg", "avif", "ico", "heic"].includes(ext)) {
+    return "image";
+  }
+  return "file";
+}
+
+// Blob: downloads (ad-network media pages, embedded viewers) resolve only
+// inside the frame that created the blob. Instead of asking the host to
+// re-download a URL it cannot fetch, read the bytes from the origin tab via
+// the content script and stream them to the host as a chunked capture. The
+// host answers with a normal capture_ok/pending/error/skipped, which the
+// message loop turns into cancel+removeFile (or "let the browser keep it").
+function captureBlobDownload(item, filename, tabUrl) {
+  const url = item.url;
+  if (!/^blob:/i.test(url)) {
+    return;
+  }
+  let origin = "";
+  try {
+    origin = new URL(url).origin;
+  } catch (error) {
+    origin = "";
+  }
+  if (!origin) {
+    return;
+  }
+  chrome.tabs.query({}, (tabs) => {
+    let target = null;
+    for (const tab of tabs || []) {
+      if (tab.id == null || !tab.url) {
+        continue;
+      }
+      let tabOrigin = "";
+      try {
+        tabOrigin = new URL(tab.url).origin;
+      } catch (error) {
+        /* keep scanning */
+      }
+      if (tabOrigin === origin) {
+        target = tab;
+        break;
+      }
+    }
+    if (!target) {
+      return;
+    }
+    chrome.tabs.sendMessage(target.id, { type: "fetch_blob", url: url }, (response) => {
+      if (chrome.runtime.lastError || !response || !response.ok || !response.data_base64) {
+        return;
+      }
+      const b64 = String(response.data_base64);
+      const key = "dl-" + item.id + "-" + Date.now();
+      const total = Math.max(1, Math.ceil(b64.length / BLOB_FETCH_BASE64_CHUNK));
+      let index = 0;
+      const sendChunk = () => {
+        const last = index === total - 1;
+        const payload = {
+          capture_key: key,
+          index: index,
+          total: total,
+          chunk: b64.slice(index * BLOB_FETCH_BASE64_CHUNK, (index + 1) * BLOB_FETCH_BASE64_CHUNK),
+          url: url,
+          filename: filename || "",
+          referrer: tabUrl || target.url || "",
+          mime_type: response.mime_type || "",
+          detected_type: detectMediaType(filename),
+          last: last,
+        };
+        if (last) {
+          request("capture_chunk", payload, (requestId) => {
+            interceptRequests.set(requestId, item.id);
+            const watchdog = setTimeout(() => {
+              interceptRequests.delete(requestId);
+              interceptTimers.delete(requestId);
+              interceptedDownloads.delete(item.id);
+            }, 30000);
+            interceptTimers.set(requestId, watchdog);
+          }).catch(() => {
+            /* byte-fetch failures fall back to the browser copy */
+          });
+          return;
+        }
+        request("capture_chunk", payload)
+          .then((ack) => {
+            if (ack && (ack.type === "capture_chunk_ok" || ack.type === "capture_pending" || ack.type === "capture_ok" || ack.type === "capture_skipped")) {
+              index += 1;
+              sendChunk();
+            } else {
+              /* unexpected ack: stop streaming */
+            }
+          })
+          .catch(() => {
+            /* byte-fetch failures fall back to the browser copy */
+          });
+      };
+      sendChunk();
+    });
+  });
+}
+
+// Route an intercepted download to the right capture path. http(s) downloads
+// are offered to the host by URL; blob: downloads are shipped as bytes from the
+// origin tab (falling back silently to the browser copy if that cannot be read).
+function submitCapture(item, filename) {
+  if (/^blob:/i.test(item.url)) {
+    captureBlobDownload(item, filename, item.referrer || "");
+    return;
+  }
+  sendCapture(item, filename);
+}
+
 // Intercept a browser download: offer the file to MagnetoClip and cancel the
 // browser copy only once MagnetoClip confirms it can download the URL. The
 // browser download is left running so that a broken/error-page URL keeps its
@@ -540,7 +738,7 @@ function interceptDownload(item) {
     if (pending && !pending.sent) {
       pending.sent = true;
       pendingIntercepts.delete(item.id);
-      sendCapture(item, pending.fallback || fallback);
+      submitCapture(item, pending.fallback || fallback);
     }
   }, 2000);
   pendingIntercepts.set(item.id, { timer: timer, fallback: fallback, sent: false });
@@ -548,26 +746,37 @@ function interceptDownload(item) {
 }
 
 chrome.downloads.onCreated.addListener((item) => {
-  if (!/^https?:/i.test(item.url)) {
+  const isHttp = /^https?:/i.test(item.url);
+  const isBlob = /^blob:/i.test(item.url);
+  if (!isHttp && !isBlob) {
     return;
   }
-  if (!integrationEnabled) {
-    return;
-  }
+  // Until settings_ok arrives from the native host, the flags hold only
+  // guesses. Claim every http(s) download and let the app — which owns the
+  // real settings — answer capture_ok/pending (cancel the browser copy) or
+  // capture_skipped (the browser keeps the file). Only use the fast scope
+  // gate below once the host has confirmed the current settings.
   const mime = (item.mime || "").toLowerCase();
   const isMedia = mime.startsWith("video/") || mime.startsWith("audio/") || mime.startsWith("image/");
   // default_downloader: intercept everything MagnetoClip understands. Otherwise
   // intercept only media when capture is enabled, and leave other files to the
   // browser's own downloader.
   const shouldCapture = defaultDownloader || (captureEnabled && isMedia);
-  if (!shouldCapture) {
+  if (settingsLoaded && (!shouldCapture || !integrationEnabled)) {
+    return;
+  }
+  // Blob: downloads (ad-network media pages, embedded viewers) can only be
+  // resolved inside the frame that created the blob, so they are only claimed
+  // when MagnetoClip is the default downloader: the bytes are pulled from the
+  // origin tab and shipped inline, and the browser copy is cancelled.
+  if (isBlob && !(settingsLoaded && defaultDownloader)) {
     return;
   }
   interceptDownload(item);
 });
 
 chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
-  if (!/^https?:/i.test(item.url)) {
+  if (!/^https?:/i.test(item.url) && !/^blob:/i.test(item.url)) {
     return;
   }
   if (!interceptedDownloads.has(item.id)) {
@@ -577,7 +786,11 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   // Let the browser save under the resolved name for now; the browser copy is
   // cancelled only if MagnetoClip confirms it can download the URL.
   const pending = pendingIntercepts.get(item.id);
-  const filename = baseName(item.filename) || (pending && pending.fallback) || "";
+  // Prefer the browser-resolved filename (from Content-Disposition), fall back
+  // to the URL-derived guess.  Strip any leading directory components that the
+  // browser may prepend (e.g. "C:\Users\...\Downloads\file.zip").
+  const resolvedName = item.filename ? baseName(item.filename) : "";
+  const filename = resolvedName || (pending && pending.fallback) || guessFilename(item.url) || "";
   try {
     suggest(filename ? { filename: filename } : undefined);
   } catch (error) {
@@ -589,7 +802,7 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   clearTimeout(pending.timer);
   pending.sent = true;
   pendingIntercepts.delete(item.id);
-  sendCapture(item, filename);
+  submitCapture(item, filename);
 });
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message && message.type === "ping") {

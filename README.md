@@ -28,7 +28,13 @@ Current version: **0.2.7**
 - **Automatic retries** — exponential backoff on transient failures (0–20 retries)
 - **Integrity verification** — finished files pass hashing checks
   (MD5 / SHA1 / SHA256 / SHA512 / BLAKE2b) before being marked complete
+- **Built-in file preview** — images, text, video, audio and torrent metadata
+  open in an in-app viewer (zoom, fit, playback controls — nothing extra is
+  downloaded); PDFs open in your default PDF viewer
 - **Global bandwidth cap** — optional MB/s throttle across all transfers
+- **Pause switch with auto-resume** — one toggle pauses every running and
+  waiting download instantly; an optional countdown timer (0–168 h) resumes
+  them automatically, and downloads added while paused stay paused
 - Per-download controls: connection count, proxy profile, basic-auth
   credentials, custom cookies, custom filename, save folder, category
 
@@ -45,6 +51,9 @@ Chromium**, connected over native messaging:
 - **Default-downloader mode** intercepts every browser download
 - **`blob:` URL resolution** — fetches browser-only blob resources through
   the extension in chunked transfer
+- **Webpage archiver** — *Archive this page with MagnetoClip* right-click
+  action saves any page as a self-contained, fully offline `.html` (images and
+  CSS are inlined server-side by the app)
 - One-click native-messaging host install per browser; auto-install via
   browser policy once the extension is store-published
 
@@ -76,6 +85,9 @@ Chromium**, connected over native messaging:
   speed, recent activity cards
 - Analytics page: totals, average and peak speed, 14-day download/bandwidth
   charts, category breakdown — computed locally, nothing leaves your PC
+- **Network speed monitor** (Speed page): built-in internet speed test —
+  download, upload and latency — with an animated circular gauge, result
+  cards, history, ISP info and throttling detection; results exportable to CSV
 
 ### Remote dashboard
 
@@ -162,7 +174,7 @@ URL and Ed25519 public key in `src/magnetoclip/config/settings.py`
 src/magnetoclip/
 ├── app/          # entrypoint, lifecycle, DI context
 ├── config/       # settings model
-├── core/         # downloads, queues, scheduler, categories, events, proxies
+├── core/         # downloads, pause, categories, dedup, events, proxies
 ├── database/     # SQLAlchemy models, repositories, migrations (SQLite, WAL)
 ├── engine/       # download engine (segments, resume, retry, verification)
 ├── intelligence/ # speed prediction, bandwidth fair-share allocation

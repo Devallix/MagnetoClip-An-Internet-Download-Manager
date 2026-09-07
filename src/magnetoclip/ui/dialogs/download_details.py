@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Qt
@@ -106,6 +107,10 @@ class DownloadDetailsDialog(QDialog):
         self.pause_button.clicked.connect(self._pause)
         controls.addWidget(self.start_button)
         controls.addWidget(self.pause_button)
+        self.preview_button = QPushButton("Preview")
+        self.preview_button.setProperty("role", "ghost")
+        self.preview_button.clicked.connect(self._preview)
+        controls.addWidget(self.preview_button)
         controls.addStretch(1)
         close_button = QPushButton("Close")
         close_button.clicked.connect(self.accept)
@@ -187,6 +192,45 @@ class DownloadDetailsDialog(QDialog):
         )
         self.start_button.setEnabled(can_start)
         self.pause_button.setEnabled(status in ACTIVE)
+        self.preview_button.setVisible(
+            status == "completed" and self._detail_can_preview()
+        )
+
+    def _detail_can_preview(self) -> bool:
+        download = self._raw_download()
+        preview = getattr(self.context, "preview", None)
+        if download is None or preview is None:
+            return False
+        return preview.type_of_download(download) != "none"
+
+    def _raw_download(self):
+        manager = getattr(self.context, "manager", None)
+        if manager is None:
+            return None
+        return manager.get_download(self._id)
+
+    def _preview(self) -> None:
+        from magnetoclip.services.preview.resolver import PreviewType
+
+        from .preview import PreviewDialog
+
+        preview = getattr(self.context, "preview", None)
+        download = self._raw_download()
+        if download is None or preview is None:
+            return
+        path = None
+        save_path = getattr(download, "save_path", None)
+        media = getattr(download, "media_metadata_json", None) or {}
+        for candidate in (save_path, media.get("path")):
+            if candidate and Path(candidate).is_file():
+                path = candidate
+                break
+        if not path:
+            return
+        preview_type = preview.resolve(path)
+        if preview_type == PreviewType.NONE:
+            return
+        PreviewDialog(self.context, path, preview_type, parent=self).exec()
 
     def _start(self) -> None:
         manager = getattr(self.context, "manager", None)

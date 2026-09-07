@@ -28,6 +28,14 @@ class Events:
     MEDIA_DETECTED = "media.detected"
     NOTIFICATION_REQUESTED = "notification.requested"
     UPDATE_AVAILABLE = "update.available"
+    TORRENT_NAME_RESOLVED = "torrent.name_resolved"
+    DUPLICATE_DETECTED = "duplicate.detected"
+    DUPLICATE_SKIPPED = "duplicate.skipped"
+    DEDUP_INDEXED = "dedup.indexed"
+    PAUSE_STATE_CHANGED = "pause.state_changed"
+    SPEED_TEST_PROGRESS = "speedtest.progress"
+    SPEED_TEST_COMPLETED = "speedtest.completed"
+    ARCHIVE_COMPLETED = "archive.completed"
 
 
 class EventBus(QObject):

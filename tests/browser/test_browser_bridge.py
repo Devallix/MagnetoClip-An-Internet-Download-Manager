@@ -16,7 +16,7 @@ from magnetoclip.browser.integration.install import (
     host_manifest_path,
 )
 from magnetoclip.browser.manager import BrowserManager
-from magnetoclip.browser.skip import enable_skip_all
+from magnetoclip.browser.skip import enable_skip_all, skip_all_active
 from magnetoclip.core.events.bus import Events
 from magnetoclip.database.models import DownloadStatus
 from tests.support.http_server import PayloadServer, html_server
@@ -60,6 +60,62 @@ def test_capture_rejected_when_integration_disabled(tmp_path):
     asyncio.run(context.shutdown())
 
 
+def test_archive_rejected_when_integration_disabled(tmp_path):
+    context = make_context(tmp_path)
+    context.settings.set("browser.integration_enabled", False)
+    bridge = BrowserManager(context)
+    response = bridge.handle_message(
+        {"type": "archive", "url": "https://example.com/page", "source": "context_menu"}
+    )
+    assert response["type"] == "archive_error"
+    asyncio.run(context.shutdown())
+
+
+def test_archive_rejects_non_http_url(tmp_path):
+    context = make_context(tmp_path)
+    bridge = BrowserManager(context)
+    response = bridge.handle_message(
+        {"type": "archive", "url": "file:///C:/tmp/x.html", "source": "context_menu"}
+    )
+    assert response["type"] == "archive_error"
+    asyncio.run(context.shutdown())
+
+
+def test_archive_queues_webpage_download(tmp_path):
+    context = make_context(tmp_path)
+    # The archiver would fetch the URL on a background thread; keep the unit
+    # test offline by short-circuiting the archive kick-off.
+    context.manager._run_archiving = lambda *args, **kwargs: None
+    bridge = BrowserManager(context)
+    posted: list[dict] = []
+    context.events.connect(Events.BROWSER_EVENT, posted.append)
+
+    response = bridge.handle_message(
+        {
+            "type": "archive",
+            "url": "https://example.com/article",
+            "cookies": "session=abc",
+            "referrer": "https://example.com/article",
+            "source": "context_menu",
+            "detected_type": "webpage",
+        }
+    )
+    assert response["type"] == "archive_ok"
+    download_id = response["download_id"]
+
+    download = context.manager.get_download(download_id)
+    assert download is not None
+    assert download.detected_type == "webpage"
+    assert download.url == "https://example.com/article"
+    snapshot = context.manager.snapshot_item(download)
+    assert snapshot["status"] == "queued"
+
+    assert len(posted) == 1
+    assert posted[0]["download_id"] == download_id
+    assert posted[0].get("archive") is True
+    asyncio.run(context.shutdown())
+
+
 def test_settings_reports_flags(tmp_path):
     context = make_context(tmp_path)
     context.settings.set("browser.capture_enabled", False)
@@ -77,6 +133,7 @@ def test_settings_reports_flags(tmp_path):
 async def test_capture_creates_and_starts_download(tmp_path):
     context = make_context(tmp_path)
     context.settings.set("browser.confirm_capture", False)
+    context.settings.set("browser.default_downloader", True)
     payload = b"x" * 4096
     bridge = BrowserManager(context)
     bridge.start(asyncio.get_running_loop())
@@ -231,25 +288,113 @@ def test_capture_pending_when_confirm_enabled(tmp_path):
         {
             "id": 7,
             "type": "capture",
-            "url": "https://example.com/file.zip",
-            "filename": "file.zip",
+            "url": "https://example.com/media.mp4",
+            "filename": "media.mp4",
+            "detected_type": "video",
             "source": "extension",
         }
     )
     assert response["type"] == "capture_pending"
     assert response["id"] == 7
-    assert response["filename"] == "file.zip"
+    assert response["filename"] == "media.mp4"
     with context.session_factory() as session:
         from magnetoclip.database.repositories import PendingCaptureRepository
 
         pending = PendingCaptureRepository(session).pending()
     assert len(pending) == 1
-    assert pending[0].url == "https://example.com/file.zip"
+    assert pending[0].url == "https://example.com/media.mp4"
+    asyncio.run(context.shutdown())
 
 
-def test_context_menu_capture_downloads_immediately(tmp_path):
+def test_extension_non_media_skipped_when_not_default_downloader(tmp_path):
+    """Out-of-scope extension captures are refused so the browser keeps the file.
+
+    The extension may offer a non-media browser download before its own
+    settings snapshot has re-synced after a service-worker wake; the app must
+    not queue files the user asked to leave to the browser.
+    """
+    context = make_context(tmp_path)
+    bridge = BrowserManager(context)
+    response = bridge.handle_message(
+        {
+            "type": "capture",
+            "url": "https://example.com/file.zip",
+            "filename": "file.zip",
+            "source": "extension",
+        }
+    )
+    assert response["type"] == "capture_skipped"
+    with context.session_factory() as session:
+        from magnetoclip.database.repositories import PendingCaptureRepository
+
+        assert PendingCaptureRepository(session).pending() == []
+    asyncio.run(context.shutdown())
+
+
+def test_extension_non_media_skipped_when_capture_disabled(tmp_path):
+    context = make_context(tmp_path)
+    context.settings.set("browser.capture_enabled", False)
+    bridge = BrowserManager(context)
+    response = bridge.handle_message(
+        {
+            "type": "capture",
+            "url": "https://example.com/video.mp4",
+            "detected_type": "video",
+            "source": "extension",
+        }
+    )
+    assert response["type"] == "capture_skipped"
+    asyncio.run(context.shutdown())
+
+
+def test_extension_media_captured_when_not_default_downloader(tmp_path):
     context = make_context(tmp_path)
     context.settings.set("browser.confirm_capture", True)
+    bridge = BrowserManager(context)
+    response = bridge.handle_message(
+        {
+            "type": "capture",
+            "url": "https://example.com/stream?format=mp4",
+            "filename": "stream.mp4",
+            "detected_type": "video",
+            "source": "extension",
+        }
+    )
+    assert response["type"] == "capture_pending"
+    with context.session_factory() as session:
+        from magnetoclip.database.repositories import PendingCaptureRepository
+
+        pending = PendingCaptureRepository(session).pending()
+    assert len(pending) == 1
+    assert pending[0].url == "https://example.com/stream?format=mp4"
+    asyncio.run(context.shutdown())
+
+
+def test_extension_non_media_accepted_when_default_downloader(tmp_path):
+    """The default-downloader scope overrides the media-only gate."""
+    context = make_context(tmp_path)
+    context.settings.set("browser.confirm_capture", True)
+    context.settings.set("browser.default_downloader", True)
+    bridge = BrowserManager(context)
+    response = bridge.handle_message(
+        {
+            "type": "capture",
+            "url": "https://example.com/file.zip",
+            "filename": "file.zip",
+            "source": "extension",
+        }
+    )
+    assert response["type"] == "capture_ok"
+    with context.session_factory() as session:
+        from magnetoclip.database.repositories import PendingCaptureRepository
+
+        assert PendingCaptureRepository(session).pending() == []
+    asyncio.run(context.shutdown())
+
+
+def test_context_menu_capture_always_pends(tmp_path):
+    context = make_context(tmp_path)
+    context.settings.set("browser.confirm_capture", False)
     bridge = BrowserManager(context)
     response = bridge.handle_message(
         {
@@ -260,18 +405,43 @@ def test_context_menu_capture_downloads_immediately(tmp_path):
             "source": "context_menu",
         }
     )
-    assert response["type"] == "capture_ok"
-    assert response["download_id"]
+    assert response["type"] == "capture_pending"
     with context.session_factory() as session:
         from magnetoclip.database.repositories import PendingCaptureRepository
 
-        assert PendingCaptureRepository(session).pending() == []
+        assert len(PendingCaptureRepository(session).pending()) == 1
     asyncio.run(context.shutdown())
 
 
-def test_popup_capture_downloads_immediately(tmp_path):
+def test_context_menu_capture_pends_when_confirm_enabled(tmp_path):
+    """Right-click captures open the confirmation dialog rather than starting
+    the download automatically, so users can review the URL before downloading."""  # noqa: E501
     context = make_context(tmp_path)
     context.settings.set("browser.confirm_capture", True)
+    bridge = BrowserManager(context)
+    response = bridge.handle_message(
+        {
+            "type": "capture",
+            "url": "https://upload.wikimedia.org/wikipedia/example.jpg",
+            "filename": "example.jpg",
+            "referrer": "https://en.wikipedia.org/example",
+            "source": "context_menu",
+        }
+    )
+    assert response["type"] == "capture_pending"
+    with context.session_factory() as session:
+        from magnetoclip.database.repositories import PendingCaptureRepository
+
+        pending = PendingCaptureRepository(session).pending()
+    assert len(pending) == 1
+    assert pending[0].url == "https://upload.wikimedia.org/wikipedia/example.jpg"
+    assert pending[0].referrer == "https://en.wikipedia.org/example"
+    asyncio.run(context.shutdown())
+
+
+def test_popup_capture_always_pends(tmp_path):
+    context = make_context(tmp_path)
+    context.settings.set("browser.confirm_capture", False)
     bridge = BrowserManager(context)
     response = bridge.handle_message(
         {
@@ -281,12 +451,11 @@ def test_popup_capture_downloads_immediately(tmp_path):
             "source": "popup",
         }
     )
-    assert response["type"] == "capture_ok"
-    assert response["download_id"]
+    assert response["type"] == "capture_pending"
     with context.session_factory() as session:
         from magnetoclip.database.repositories import PendingCaptureRepository
 
-        assert PendingCaptureRepository(session).pending() == []
+        assert len(PendingCaptureRepository(session).pending()) == 1
     asyncio.run(context.shutdown())
 
 
@@ -590,6 +759,24 @@ def test_capture_pending_after_skip_all_window_expires(tmp_path):
     asyncio.run(context.shutdown())
 
 
+def test_skip_all_reads_live_db_not_stale_snapshot(tmp_path):
+    context = make_context(tmp_path)
+    from magnetoclip.database.repositories import SettingsStore
+
+    # Regression: unchecking "Skip all" in the app clears the settings table,
+    # but the native-messaging host runs as a separate process with its own
+    # in-memory snapshot. skip_all_active must consult the DB so the host stops
+    # auto-rejecting captures immediately, without waiting for a refresh.
+    context.settings.set(
+        "browser.skip_all_until",
+        (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+    )
+    SettingsStore(context.session_factory).save("browser.skip_all_until", "")
+
+    assert skip_all_active(context) is False
+    asyncio.run(context.shutdown())
+
+
 def test_capture_pending_stores_cookies(tmp_path):
     context = make_context(tmp_path)
     context.settings.set("browser.confirm_capture", True)
@@ -597,8 +784,9 @@ def test_capture_pending_stores_cookies(tmp_path):
     response = bridge.handle_message(
         {
             "type": "capture",
-            "url": "https://example.com/file.zip",
-            "filename": "file.zip",
+            "url": "https://example.com/media.mp4",
+            "filename": "media.mp4",
+            "detected_type": "video",
             "source": "extension",
             "cookies": "SID=abc123; HSID=def456",
         }

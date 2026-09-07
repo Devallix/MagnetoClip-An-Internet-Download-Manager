@@ -234,8 +234,13 @@ class DetectedPage(Page):
         manager.start(download_id)
 
     def _remove_selected(self) -> None:
-        for row in self._selected_indexes():
-            self._remove_entry(self._files[row])
+        urls = {self._files[row]["url"] for row in self._selected_indexes()}
+        if not urls:
+            return
+        with self.context.session_factory() as session:
+            from magnetoclip.database.repositories import BrowserDetectionRepository
+
+            BrowserDetectionRepository(session).remove_urls_everywhere(urls)
         self.refresh()
 
     def _remove_entry(self, entry: dict) -> None:

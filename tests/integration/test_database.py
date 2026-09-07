@@ -2,6 +2,7 @@ from sqlalchemy import inspect
 
 from magnetoclip.database.models import DownloadStatus
 from magnetoclip.database.repositories import (
+    BrowserDetectionRepository,
     BrowserRequestRepository,
     DownloadRepository,
     SettingsStore,
@@ -26,6 +27,7 @@ def test_migrations_create_full_schema(tmp_path):
         "browser_detections",
         "browser_requests",
         "torrent_search_history",
+        "speed_tests",
         "schema_version",
     ):
         assert inspector.has_table(table), f"missing table {table}"
@@ -94,12 +96,12 @@ def test_settings_store_roundtrip(tmp_path):
     db.close()
 
 
-def test_schedule_crud_removed(tmp_path):
-    """Legacy queue/schedule tables must be dropped by migration 009."""
+def test_legacy_tables_removed(tmp_path):
+    """Legacy queue/schedule tables must not survive migrations."""
     db = Database(tmp_path / "test.db")
     db.initialize()
     inspector = inspect(db.engine)
-    for table in ("queues", "queue_items", "schedules"):
+    for table in ("queues", "queue_items", "schedules", "schedule_rules"):
         assert not inspector.has_table(table), f"table {table} should be gone"
     columns = {c["name"] for c in inspector.get_columns("downloads")}
     assert "queue_id" not in columns
@@ -147,4 +149,65 @@ def test_browser_request_repository_errors_and_expiry(tmp_path):
     # Expiring a finished request leaves its state untouched.
     assert repo.mark_expired(request.id)
     assert repo.get(request.id).status == "error"
+    db.close()
+
+
+def test_browser_detection_remove_urls_batched(tmp_path):
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    repo = BrowserDetectionRepository(db.Session())
+
+    shared = {"url": "https://cdn.example.com/shared.mp4", "filename": "shared.mp4"}
+    repo.add(
+        "https://example.com/a",
+        count=3,
+        files=[
+            shared,
+            {"url": "https://cdn.example.com/a.mp4", "filename": "a.mp4"},
+            {"url": "https://cdn.example.com/keep.zip", "filename": "keep.zip"},
+        ],
+        notified=True,
+    )
+    repo.add(
+        "https://example.com/b",
+        count=2,
+        files=[
+            shared,
+            {"url": "https://cdn.example.com/b.mp4", "filename": "b.mp4"},
+        ],
+        notified=True,
+    )
+
+    # Shared URL appears in two detections, so a single URL must clear both.
+    repo.remove_urls_everywhere({shared["url"], "https://cdn.example.com/b.mp4"})
+
+    detections = repo.list_detections(limit=100)
+    assert len(detections) == 1
+    remaining = detections[0].files_json or []
+    assert [f["url"] for f in remaining] == [
+        "https://cdn.example.com/a.mp4",
+        "https://cdn.example.com/keep.zip",
+    ]
+    assert detections[0].count == 2
+
+    # No-op for unknown URLs.
+    repo.remove_urls_everywhere({"https://nowhere.example/x"})
+    assert len(repo.list_detections(limit=100)) == 1
+
+
+def test_browser_detection_remove_file_everywhere(tmp_path):
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    repo = BrowserDetectionRepository(db.Session())
+
+    url = "https://cdn.example.com/only.mp4"
+    repo.add(
+        "https://example.com/p",
+        count=1,
+        files=[{"url": url, "filename": "only.mp4"}],
+        notified=True,
+    )
+
+    repo.remove_file_everywhere(url)
+    assert repo.list_detections() == []
     db.close()

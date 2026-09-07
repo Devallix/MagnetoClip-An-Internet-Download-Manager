@@ -19,7 +19,7 @@ import httpx
 from magnetoclip.core.events.bus import Events
 from magnetoclip.intelligence import BandwidthAllocator
 from magnetoclip.network.auth.credentials import AuthSpec
-from magnetoclip.network.content import should_reject_html_body
+from magnetoclip.network.content import content_type_extension, should_reject_html_body
 from magnetoclip.network.http.client import ClientConfig, build_client
 from magnetoclip.network.http.disposition import parse_content_disposition
 from magnetoclip.network.http.range import parse_content_range
@@ -223,6 +223,7 @@ class DownloadTask:
             if not info.supports_ranges:
                 self.spec.connections_max = 1
             self._reject_html_substitute(info)
+            self._derive_extension_from_content_type(info)
 
         if not self.state.segments:
             self._plan_segments()
@@ -320,6 +321,34 @@ class DownloadTask:
                 "server returned an HTML page instead of the requested file "
                 "(the link may be broken, removed, or behind a login)"
             )
+
+    def _derive_extension_from_content_type(self, info: RemoteFileInfo) -> None:
+        """Give a filename its extension when the URL provided none.
+
+        Extensionless CDN URLs (e.g. Google's ``encrypted-tbn0.gstatic.com``
+        image thumbnails, which carry the real bytes but no ``.jpg``) would
+        otherwise save as an empty-extension file. When the target filename has
+        no suffix and the server reports a content type we recognise, append the
+        matching extension before the segments are planned.
+        """
+        if info.content_disposition_filename and "." in info.content_disposition_filename:
+            return
+        name = self.spec.filename or ""
+        if "." in name.split("/")[-1]:
+            return
+        ext = content_type_extension(info.content_type)
+        if not ext:
+            return
+        base = name or "download"
+        new_name = f"{base}.{ext}"
+        self.spec.filename = new_name
+        log.info(
+            "filename_extension_derived",
+            download_id=self.spec.download_id,
+            from_filename=name,
+            to_filename=new_name,
+            content_type=info.content_type,
+        )
 
     def _plan_segments(self) -> None:
         total = self.state.total_size
