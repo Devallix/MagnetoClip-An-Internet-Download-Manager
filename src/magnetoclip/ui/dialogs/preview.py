@@ -7,6 +7,7 @@ application since Qt ships no embedded PDF viewer.
 from __future__ import annotations
 
 import math
+import threading
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -16,12 +17,26 @@ from PySide6.QtCore import (
     QRectF,
     QSize,
     Qt,
+    QThread,
     QTimer,
     QUrl,
+    Signal,
 )
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QPolygonF, QWheelEvent
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-from PySide6.QtMultimediaWidgets import QVideoWidget
+from PySide6.QtGui import (
+    QColor,
+    QImage,
+    QPainter,
+    QPen,
+    QPixmap,
+    QPolygonF,
+    QWheelEvent,
+)
+from PySide6.QtMultimedia import (
+    QAudioOutput,
+    QMediaPlayer,
+    QVideoFrame,
+    QVideoSink,
+)
 from PySide6.QtWidgets import (
     QAbstractButton,
     QAbstractItemView,
@@ -35,15 +50,70 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
+    QWidget,
 )
 
+from magnetoclip.media.ffmpeg import FFmpegLocator
+from magnetoclip.media.streaming import DownloadCancelled
+from magnetoclip.services.logging.setup import get_logger
+from magnetoclip.services.preview import proxy as preview_proxy
 from magnetoclip.services.preview.resolver import PreviewType
 
 from ..util import format_bytes, open_path
+
+log = get_logger(__name__)
+
+# How long playback gets to produce its first video frame before the preview
+# assumes the codec is undecodable and falls back to a transcoded proxy. Kept
+# generous so a large file on slow storage is not mistaken for a bad codec.
+_FRAME_GRACE_MS = 2500
+
+
+class _PreviewProxyWorker(QThread):
+    """Transcodes a source into a playable proxy off the UI thread."""
+
+    progress = Signal(float)
+    ready = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, *, source: str, context, destination) -> None:
+        super().__init__()
+        self._source = source
+        self._context = context
+        self._destination = destination
+        self._cancel = threading.Event()
+
+    def request_cancel(self) -> None:
+        self._cancel.set()
+
+    def run(self) -> None:
+        try:
+            from magnetoclip.media.ffmpeg import create_preview_proxy
+
+            path = create_preview_proxy(
+                self._source,
+                self._destination,
+                locator=FFmpegLocator(
+                    settings=getattr(self._context, "settings", None)
+                ),
+                max_seconds=preview_proxy.PROXY_MAX_SECONDS,
+                max_width=preview_proxy.PROXY_MAX_WIDTH,
+                progress_cb=self.progress.emit,
+                cancel_event=self._cancel,
+            )
+        except DownloadCancelled:
+            return
+        except Exception as exc:  # noqa: BLE001 - reported through failed()
+            log.warning("preview_proxy_failed", error=str(exc))
+            self.failed.emit(str(exc))
+            return
+        if not self._cancel.is_set():
+            self.ready.emit(str(path))
 
 # ── palette tokens ─────────────────────────────────────────────────────────
 _SURFACE = "#131624"
@@ -193,6 +263,78 @@ class _MediaControlButton(QAbstractButton):
             )
 
 
+class _VideoSurface(QWidget):
+    """Paints the most recent decoded frame, letterboxed and aspect-fitted.
+
+    ``QVideoWidget`` renders through a composition path that never reaches the
+    widget on the affected Qt 6.11 Windows build, so a previewed clip showed a
+    black rectangle while its audio played. Painting the frame ourselves keeps
+    the ordinary widget repaint pipeline, which does work.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._frame: QImage | None = None
+        self.paints_with_frame = 0
+        self.setMinimumSize(320, 180)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+
+    def has_frame(self) -> bool:
+        return self._frame is not None and not self._frame.isNull()
+
+    def set_frame(self, frame: QVideoFrame) -> None:
+        image = frame.toImage()
+        if image.isNull():
+            return
+        self._frame = image
+        self.update()
+
+    def clear_frame(self) -> None:
+        self._frame = None
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), Qt.black)
+        image = self._frame
+        if image is not None and not image.isNull():
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            scaled = image.scaled(
+                self.size(),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+            painter.drawImage(
+                QPointF(
+                    (self.width() - scaled.width()) / 2,
+                    (self.height() - scaled.height()) / 2,
+                ),
+                scaled,
+            )
+            self.paints_with_frame += 1
+        painter.end()
+
+
+class _VideoFrameSink(QVideoSink):
+    """Forwards decoded frames from ``QVideoSink`` onto a :class:`_VideoSurface`.
+
+    The frames arrive on the ``videoFrameChanged`` signal rather than through an
+    ``onVideoFrameChanged`` override: PySide6 does not dispatch that virtual, so
+    an override runs silently and the surface never updates.
+    """
+
+    def __init__(self, surface: _VideoSurface) -> None:
+        super().__init__()
+        self._surface = surface
+        self.frames = 0
+        self.videoFrameChanged.connect(self._on_frame)
+
+    def _on_frame(self, frame: QVideoFrame) -> None:
+        self.frames += 1
+        self._surface.set_frame(frame)
+
+
 class PreviewDialog(QDialog):
     def __init__(self, context, path: str, preview_type: PreviewType, parent=None) -> None:
         super().__init__(parent)
@@ -200,6 +342,11 @@ class PreviewDialog(QDialog):
         self.path = path
         self.preview_type = preview_type
         self.player: QMediaPlayer | None = None
+        self._autoplay = False
+        self._proxy_worker: _PreviewProxyWorker | None = None
+        self._proxy_timer: QTimer | None = None
+        self._proxy_tried = False
+        self._proxy_path: str | None = None
         self.setWindowTitle(f"Preview — {Path(path).name}")
         self.resize(900, 640)
         self.setWindowFlags(
@@ -324,11 +471,12 @@ class PreviewDialog(QDialog):
         self.player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
         self.player.setAudioOutput(self.audio_output)
-        self.video_widget = QVideoWidget()
-        self.player.setVideoOutput(self.video_widget)
+        self.video_surface = _VideoSurface()
+        self.video_sink = _VideoFrameSink(self.video_surface)
+        self.player.setVideoOutput(self.video_sink)
         self.player.setSource(QUrl.fromLocalFile(self.path))
 
-        layout.addWidget(self.video_widget, 1)
+        layout.addWidget(self.video_surface, 1)
 
         self._build_media_controls(layout)
 
@@ -336,7 +484,101 @@ class PreviewDialog(QDialog):
         self.player.positionChanged.connect(lambda _: self._on_position_changed())
         self.player.durationChanged.connect(self._on_duration_changed)
         self.player.errorOccurred.connect(self._on_player_error)
+        self.player.mediaStatusChanged.connect(self._on_media_status_changed)
+        # Playback starts from showEvent: starting here would run before the
+        # surface has a paintable geometry.
+        self._autoplay = True
+
+    # ----- undecodable video fallback -----
+
+    def _arm_frame_watchdog(self) -> None:
+        """Fall back to a transcoded proxy if the video track yields no frames.
+
+        Some codecs decode to nothing in Qt's bundled FFmpeg — AV1 ships there
+        without a software decoder — so the file plays audio over a black
+        surface. Waiting for frames rather than sniffing codec names means any
+        undecodable track is handled, not just the ones known today.
+        """
+        if self._proxy_worker is not None or self._proxy_tried:
+            return
+        self._proxy_timer = QTimer(self)
+        self._proxy_timer.setSingleShot(True)
+        self._proxy_timer.timeout.connect(self._maybe_build_proxy)
+        self._proxy_timer.start(_FRAME_GRACE_MS)
+
+    def _maybe_build_proxy(self) -> None:
+        if self.video_sink.frames > 0 or self._proxy_tried:
+            return
+        self._proxy_tried = True
+        cached = preview_proxy.cached_proxy(self.path, self.context)
+        if cached is not None:
+            self._use_proxy(cached, note="Showing a cached compatible preview.")
+            return
+        try:
+            locator = FFmpegLocator(
+                settings=getattr(self.context, "settings", None)
+            )
+            if not locator.ffmpeg_available:
+                self._on_undecodable_video("ffmpeg was not found on this system")
+                return
+        except Exception as exc:  # noqa: BLE001 - never block the dialog
+            self._on_undecodable_video(f"ffmpeg is unavailable: {exc}")
+            return
+
+        self._on_proxy_progress(0.0)
+        self._proxy_worker = _PreviewProxyWorker(
+            source=self.path,
+            context=self.context,
+            destination=preview_proxy.proxy_path(self.path, self.context),
+        )
+        self._proxy_worker.progress.connect(self._on_proxy_progress)
+        self._proxy_worker.ready.connect(self._use_proxy)
+        self._proxy_worker.failed.connect(self._on_undecodable_video)
+        self._proxy_worker.finished.connect(self._forget_proxy_worker)
+        self._proxy_worker.start()
+
+    def _on_proxy_progress(self, seconds: float) -> None:
+        self.media_error_label.setText(
+            "This codec cannot be previewed directly — preparing a "
+            f"compatible version… {int(seconds)}s"
+        )
+        self.media_error_label.show()
+
+    def _use_proxy(self, path, note: str | None = None) -> None:
+        if self.player is None:
+            return
+        self._proxy_path = str(path)
+        self._clear_playback_error()
+        self.player.stop()
+        self.player.setSource(QUrl.fromLocalFile(self._proxy_path))
         self.player.play()
+        if note:
+            self.media_error_label.setText(note)
+            self.media_error_label.show()
+
+    def _on_undecodable_video(self, reason: str) -> None:
+        self._on_player_error(
+            QMediaPlayer.Error.FormatError,
+            f"The video track could not be decoded ({reason}). "
+            "Use 'Open Externally' to view it in another player.",
+        )
+
+    def _forget_proxy_worker(self) -> None:
+        worker = self._proxy_worker
+        self._proxy_worker = None
+        if worker is not None:
+            worker.deleteLater()
+
+    def _cancel_proxy(self) -> None:
+        if self._proxy_timer is not None:
+            self._proxy_timer.stop()
+            self._proxy_timer = None
+        worker = self._proxy_worker
+        if worker is None:
+            return
+        worker.request_cancel()
+        worker.wait(3000)
+        self._proxy_worker = None
 
     # ----- audio -----
 
@@ -388,8 +630,42 @@ class PreviewDialog(QDialog):
         self.media_time_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.media_time_label)
 
+        # Errors get their own label. They used to be written to the elapsed
+        # time label, which refreshes several times a second and therefore
+        # wiped the message before it could be read.
+        self.media_error_label = QLabel()
+        self.media_error_label.setObjectName("card_caption")
+        self.media_error_label.setAlignment(Qt.AlignCenter)
+        self.media_error_label.setWordWrap(True)
+        self.media_error_label.hide()
+        layout.addWidget(self.media_error_label)
+
+    def _clear_playback_error(self) -> None:
+        label = getattr(self, "media_error_label", None)
+        if label is not None:
+            label.clear()
+            label.hide()
+
+    def _reject_video_without_track(self) -> None:
+        if self.preview_type is not PreviewType.VIDEO:
+            return
+        self._clear_playback_error()
+        self.media_error_label.setText(
+            "This file has no video track — only audio can be previewed."
+        )
+        self.media_error_label.show()
+
+    def _on_media_status_changed(self, status) -> None:
+        if (
+            status == QMediaPlayer.MediaStatus.InvalidMedia
+            and self.preview_type is PreviewType.VIDEO
+            and not self.player.hasVideo()
+        ):
+            self._reject_video_without_track()
+
     def _play_pressed(self) -> None:
         if self.player is not None:
+            self._clear_playback_error()
             self.player.play()
 
     def _pause_pressed(self) -> None:
@@ -435,9 +711,10 @@ class PreviewDialog(QDialog):
     def _on_player_error(self, error, error_string: str) -> None:
         if error == QMediaPlayer.Error.NoError:
             return
-        self.media_time_label.setText(
+        self.media_error_label.setText(
             f"Playback unavailable: {error_string or str(error)}"
         )
+        self.media_error_label.show()
 
     # ----- fallback (pdf) -----
 
@@ -547,9 +824,22 @@ class PreviewDialog(QDialog):
         if not open_path(self.path):
             QMessageBox.warning(self, "Preview", "No application is associated with this file.")
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._autoplay and self.player is not None:
+            self._autoplay = False
+            self._clear_playback_error()
+            self.player.play()
+            if self.preview_type is PreviewType.VIDEO:
+                self._arm_frame_watchdog()
+
     def closeEvent(self, event) -> None:
         if self.player is not None:
             self.player.stop()
+        self._cancel_proxy()
+        surface = getattr(self, "video_surface", None)
+        if surface is not None:
+            surface.clear_frame()
         super().closeEvent(event)
 
 
