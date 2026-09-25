@@ -26,6 +26,20 @@ PROXY_DIR_NAME = "preview_cache"
 _PROXY_KEEP = 8
 _PROXY_MAX_AGE_SECONDS = 7 * 24 * 3600
 
+# Video codecs Qt's bundled FFmpeg has no usable decoder for. Its avcodec ships
+# the native ``av1`` decoder behind a d3d11 hardware path only, so without a
+# supported GPU the decode fails and the file yields audio with no frames.
+# Handing such a file to QMediaPlayer only produces a wall of decoder errors
+# before any frames appear, so the preview goes straight to a proxy instead.
+UNSUPPORTED_CODECS = frozenset({"av1"})
+
+
+def needs_proxy(codec: str | None) -> bool:
+    """Whether *codec* must be transcoded before Qt can preview it."""
+    if not codec:
+        return False
+    return codec.strip().lower() in UNSUPPORTED_CODECS
+
 
 def cache_dir(context=None) -> Path:
     """Directory holding preview proxies, created on demand."""

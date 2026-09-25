@@ -91,6 +91,25 @@ def test_cached_proxy_finds_a_built_proxy(tmp_path, monkeypatch):
     assert preview_proxy.cached_proxy(source, None) == built
 
 
+def test_av1_is_routed_to_a_proxy_but_other_codecs_are_not():
+    """Handing AV1 to Qt only floods the log and shows black.
+
+    Its bundled FFmpeg has no software AV1 decoder, so the preview must
+    transcode instead of attempting playback.
+    """
+    assert preview_proxy.needs_proxy("av1") is True
+    assert preview_proxy.needs_proxy("AV1") is True
+    # Codecs Qt does decode must keep playing natively.
+    for codec in ("h264", "hevc", "vp9", "mpeg4", "mjpeg", "wmv3"):
+        assert preview_proxy.needs_proxy(codec) is False
+
+
+def test_unknown_codec_is_left_to_playback():
+    """No probe result must not block normal playback."""
+    assert preview_proxy.needs_proxy(None) is False
+    assert preview_proxy.needs_proxy("") is False
+
+
 def test_prune_keeps_the_newest_entries(tmp_path):
     old = tmp_path / "old.mkv"
     new = tmp_path / "new.mkv"

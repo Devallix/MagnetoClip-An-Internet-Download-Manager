@@ -74,6 +74,47 @@ log = get_logger(__name__)
 _FRAME_GRACE_MS = 2500
 
 
+class _CodecCheckWorker(QThread):
+    """Probes a source's video codec off the UI thread before playback starts.
+
+    Handing a file with an undecodable codec to ``QMediaPlayer`` still produces
+    audio, but it also floods the log with per-frame decoder failures and shows
+    a black surface. Checking first lets the preview skip that entirely.
+    """
+
+    verdict = Signal(str)
+
+    def __init__(self, *, source: str, context) -> None:
+        super().__init__()
+        self._source = source
+        self._context = context
+        self._cancel = threading.Event()
+
+    def request_cancel(self) -> None:
+        self._cancel.set()
+
+    def run(self) -> None:
+        try:
+            import asyncio
+
+            from magnetoclip.media.ffmpeg import probe
+
+            info = asyncio.run(
+                probe(
+                    self._source,
+                    FFmpegLocator(settings=getattr(self._context, "settings", None)),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - fall back to normal playback
+            log.warning("preview_probe_failed", error=str(exc))
+            self.verdict.emit("playable")
+            return
+        if self._cancel.is_set():
+            return
+        codec = (info or {}).get("codec")
+        self.verdict.emit("unsupported" if preview_proxy.needs_proxy(codec) else "playable")
+
+
 class _PreviewProxyWorker(QThread):
     """Transcodes a source into a playable proxy off the UI thread."""
 
@@ -344,8 +385,10 @@ class PreviewDialog(QDialog):
         self.player: QMediaPlayer | None = None
         self._autoplay = False
         self._proxy_worker: _PreviewProxyWorker | None = None
+        self._check_worker: _CodecCheckWorker | None = None
         self._proxy_timer: QTimer | None = None
         self._proxy_tried = False
+        self._playback_started = False
         self._proxy_path: str | None = None
         self.setWindowTitle(f"Preview — {Path(path).name}")
         self.resize(900, 640)
@@ -491,15 +534,47 @@ class PreviewDialog(QDialog):
 
     # ----- undecodable video fallback -----
 
+    def _begin_playback(self) -> None:
+        """Start playback, transcoding first if the codec cannot be decoded."""
+        if self._playback_started:
+            return
+        self._playback_started = True
+        cached = preview_proxy.cached_proxy(self.path, self.context)
+        if cached is not None:
+            self._use_proxy(cached, note="Showing a cached compatible preview.")
+            return
+        # A cached proxy is not always present, and the probe is cheap, so ask
+        # ffprobe what the video codec is before letting Qt try to decode it.
+        # The watchdog still runs underneath as a safety net for codecs that
+        # ffprobe reports as fine but that Qt turns out not to decode.
+        self._check_worker = _CodecCheckWorker(source=self.path, context=self.context)
+        self._check_worker.verdict.connect(self._on_codec_verdict)
+        self._check_worker.finished.connect(self._forget_check_worker)
+        self._check_worker.start()
+        self._arm_frame_watchdog()
+
+    def _on_codec_verdict(self, verdict: str) -> None:
+        if verdict == "unsupported":
+            self._maybe_build_proxy()
+            return
+        if self.player is not None:
+            self.player.play()
+
+    def _forget_check_worker(self) -> None:
+        worker = self._check_worker
+        self._check_worker = None
+        if worker is not None:
+            worker.deleteLater()
+
     def _arm_frame_watchdog(self) -> None:
         """Fall back to a transcoded proxy if the video track yields no frames.
 
-        Some codecs decode to nothing in Qt's bundled FFmpeg — AV1 ships there
-        without a software decoder — so the file plays audio over a black
-        surface. Waiting for frames rather than sniffing codec names means any
-        undecodable track is handled, not just the ones known today.
+        Some codecs decode to nothing in Qt's bundled FFmpeg, so the file plays
+        audio over a black surface. Waiting for frames rather than trusting the
+        codec name means any undecodable track is handled, not only the ones
+        known today.
         """
-        if self._proxy_worker is not None or self._proxy_tried:
+        if self._proxy_timer is not None or self._proxy_tried:
             return
         self._proxy_timer = QTimer(self)
         self._proxy_timer.setSingleShot(True)
@@ -510,6 +585,9 @@ class PreviewDialog(QDialog):
         if self.video_sink.frames > 0 or self._proxy_tried:
             return
         self._proxy_tried = True
+        if self._proxy_timer is not None:
+            self._proxy_timer.stop()
+            self._proxy_timer = None
         cached = preview_proxy.cached_proxy(self.path, self.context)
         if cached is not None:
             self._use_proxy(cached, note="Showing a cached compatible preview.")
@@ -573,11 +651,12 @@ class PreviewDialog(QDialog):
         if self._proxy_timer is not None:
             self._proxy_timer.stop()
             self._proxy_timer = None
-        worker = self._proxy_worker
-        if worker is None:
-            return
-        worker.request_cancel()
-        worker.wait(3000)
+        for worker in (self._check_worker, self._proxy_worker):
+            if worker is None:
+                continue
+            worker.request_cancel()
+            worker.wait(3000)
+        self._check_worker = None
         self._proxy_worker = None
 
     # ----- audio -----
@@ -829,9 +908,10 @@ class PreviewDialog(QDialog):
         if self._autoplay and self.player is not None:
             self._autoplay = False
             self._clear_playback_error()
-            self.player.play()
             if self.preview_type is PreviewType.VIDEO:
-                self._arm_frame_watchdog()
+                self._begin_playback()
+            else:
+                self.player.play()
 
     def closeEvent(self, event) -> None:
         if self.player is not None:

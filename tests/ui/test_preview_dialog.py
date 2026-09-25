@@ -12,6 +12,7 @@ from PySide6.QtGui import QColor, QImage
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame
 from PySide6.QtMultimediaWidgets import QVideoWidget
 
+from magnetoclip.services.preview import proxy as preview_proxy
 from magnetoclip.services.preview.resolver import PreviewType
 from magnetoclip.ui.dialogs.preview import (
     PreviewDialog,
@@ -162,3 +163,57 @@ def test_video_dialog_defers_playback_until_shown(qtbot, tmp_path):
     qtbot.wait(50)
 
     assert dialog._autoplay is False
+
+
+def test_undecodable_codec_starts_a_proxy_instead_of_playing(qtbot, tmp_path, monkeypatch):
+    """An AV1 source must be transcoded, never handed to QMediaPlayer."""
+    target = tmp_path / "clip.mkv"
+    target.write_bytes(b"not a real clip")
+    monkeypatch.setattr(preview_proxy, "cached_proxy", lambda *a, **k: None)
+    monkeypatch.setattr(
+        preview_proxy, "needs_proxy", lambda codec: codec == "av1", raising=True
+    )
+
+    dialog = PreviewDialog(None, str(target), PreviewType.VIDEO)
+    qtbot.addWidget(dialog)
+    monkeypatch.setattr(
+        dialog, "_maybe_build_proxy", lambda: setattr(dialog, "_proxy_tried", True)
+    )
+    dialog._on_codec_verdict("unsupported")
+
+    assert dialog._proxy_tried is True
+    # The source must not have been played.
+    assert dialog.player.source().isEmpty() or dialog._proxy_path is None
+
+
+def test_playable_codec_starts_normal_playback(qtbot, tmp_path):
+    target = tmp_path / "clip.mp4"
+    target.write_bytes(b"not a real clip")
+
+    dialog = PreviewDialog(None, str(target), PreviewType.VIDEO)
+    qtbot.addWidget(dialog)
+    played = []
+    dialog.player.play = lambda: played.append(True)
+
+    dialog._on_codec_verdict("playable")
+
+    assert played == [True]
+    assert dialog._proxy_tried is False
+
+
+def test_close_stops_playback_and_releases_the_frame(qtbot, tmp_path):
+    target = tmp_path / "clip.mp4"
+    target.write_bytes(b"not a real clip")
+
+    dialog = PreviewDialog(None, str(target), PreviewType.VIDEO)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.wait(30)
+    dialog.video_surface.set_frame(_red_frame())
+    assert dialog.video_surface.has_frame()
+
+    dialog.close()
+
+    assert not dialog.video_surface.has_frame()
+    assert dialog._check_worker is None
+    assert dialog._proxy_worker is None
