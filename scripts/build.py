@@ -6,7 +6,9 @@ Usage:
 """
 
 from __future__ import annotations
+
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -31,10 +33,32 @@ def _require_pyinstaller() -> None:
         )
 
 
+def _clear_dist() -> None:
+    """Remove dist/, explaining clearly when it is still in use.
+
+    A running MagnetoClip holds locks on dist/, and rmtree then dies with an
+    opaque PermissionError partway through deleting, several minutes into the
+    build. Renaming the directory first detects that immediately, and needs no
+    new dependency.
+    """
+    if not DIST.exists():
+        return
+    doomed = DIST.with_name(f"{DIST.name}.stale")
+    if doomed.exists():
+        shutil.rmtree(doomed, ignore_errors=True)
+    try:
+        DIST.rename(doomed)
+    except OSError as exc:
+        raise SystemExit(
+            f"Cannot remove {DIST} ({exc}).\n"
+            "Close any running MagnetoClip (it keeps files in dist/ open) and retry."
+        ) from exc
+    shutil.rmtree(doomed, ignore_errors=True)
+
+
 def build_app() -> None:
     _require_pyinstaller()
-    if DIST.exists():
-        shutil.rmtree(DIST)
+    _clear_dist()
     print(f"Building with {SPEC.name}...")
     subprocess.run(
         [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", str(SPEC)],
@@ -81,7 +105,7 @@ def build_zip() -> Path:
         exe_path = app_dir / "MagnetoClip.exe"
         if exe_path.exists():
             zf.write(exe_path, "MagnetoClip.exe")
-            print(f"  + MagnetoClip.exe")
+            print("  + MagnetoClip.exe")
 
         internal_dir = app_dir / "_internal"
         if internal_dir.exists():
@@ -89,7 +113,7 @@ def build_zip() -> Path:
                 if file_path.is_file():
                     arcname = f"_internal/{file_path.relative_to(internal_dir)}"
                     zf.write(file_path, arcname)
-            print(f"  + _internal/")
+            print("  + _internal/")
 
     sha256 = hashlib.sha256()
     with open(zip_path, "rb") as f:
@@ -121,17 +145,40 @@ def build_zip() -> Path:
     return zip_path
 
 
-def build_installer() -> None:
-    import shutil
+def _find_iscc() -> str | None:
+    """Locate ISCC.exe: PATH first, then the usual install locations.
 
-    iscc = shutil.which("ISCC.exe")
+    A per-user install (what winget produces without admin) lives under
+    LOCALAPPDATA rather than Program Files, so it is not on PATH by default.
+    """
+    found = shutil.which("ISCC.exe") or shutil.which("iscc")
+    if found:
+        return found
+    candidates = [
+        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
+        / "Inno Setup 6" / "ISCC.exe",
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+        / "Inno Setup 6" / "ISCC.exe",
+        Path.home() / "AppData/Local/Programs/Inno Setup 6/ISCC.exe",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def build_installer() -> None:
+    iscc = _find_iscc()
     if iscc is None:
         print(
-            "Inno Setup not found on PATH. Install it from "
+            "Inno Setup not found. Install it from "
             "https://jrsoftware.org/isinfo.php and add ISCC.exe to PATH."
         )
         raise SystemExit(1)
-    print("Compiling installer...")
+    print(f"Compiling installer with {iscc}...")
+    # No /DProjectRoot here: ISCC re-splits define values on spaces, and the
+    # repo path contains one. The .iss defaults ProjectRoot to "..", which is
+    # correct because it lives in scripts/ and the build tree is at ../dist.
     subprocess.run([iscc, str(ISS)], cwd=ROOT, check=True)
 
 

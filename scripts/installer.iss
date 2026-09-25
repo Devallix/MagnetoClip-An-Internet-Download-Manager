@@ -1,8 +1,21 @@
 ; MagnetoClip Inno Setup installer script.
 ; Compile with: ISCC.exe scripts/installer.iss  (run from project root)
+;
+; Keep MyAppVersion in step with src/magnetoclip/version.py, which is the single
+; source of truth used by the release zip and manifest.
+;
+; Inno Setup resolves relative Source/OutputDir paths against the directory
+; holding this script, not the working directory, so they are anchored on
+; ProjectRoot, which defaults to the repository root one level up. It stays a
+; #ifndef so a build system can override it with /DProjectRoot=... when the
+; checkout path has no spaces (ISCC splits define values on spaces).
+
+#ifndef ProjectRoot
+  #define ProjectRoot ".."
+#endif
 
 #define MyAppName "MagnetoClip"
-#define MyAppVersion "0.2.7"
+#define MyAppVersion "0.2.8"
 #define MyAppPublisher "MagnetoClip"
 #define MyAppExeName "MagnetoClip.exe"
 
@@ -14,7 +27,7 @@ AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
-OutputDir=dist
+OutputDir={#ProjectRoot}\dist
 OutputBaseFilename=MagnetoClip-Setup
 Compression=lzma
 SolidCompression=yes
@@ -29,8 +42,12 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "dist\MagnetoClip\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "dist\MagnetoClip\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Paths reference ProjectRoot directly: ISCC substitutes a #define value
+; literally, so an intermediate macro holding {#ProjectRoot} would not expand.
+; The second entry recurses, so it also carries the bundled ffmpeg.exe that
+; previews depend on.
+Source: "{#ProjectRoot}\dist\MagnetoClip\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#ProjectRoot}\dist\MagnetoClip\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
