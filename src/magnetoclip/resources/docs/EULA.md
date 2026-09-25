@@ -82,6 +82,14 @@ otherwise made available to you. To the extent of any conflict between this
 Agreement and the license terms of a Third-Party Component, the license terms
 of the Third-Party Component will govern with respect to that component.
 
+**4.2. Bundled FFmpeg.** The Software includes a copy of FFmpeg, used to
+generate video previews for formats your system cannot decode directly. That
+copy is distributed under the GNU Lesser General Public License, version 2.1
+or later, and is invoked as a separate program; it is not linked into the
+Software. You may replace or remove it and point the Software at a different
+FFmpeg installation via the application's settings. Its license text is
+included with the Software as `FFMPEG_LICENSE.md`.
+
 ## 5. User Obligations and Acceptable Use
 
 **5.1.** You agree to use the Software only in accordance with this Agreement,

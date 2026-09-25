@@ -54,6 +54,17 @@ datas.append(
     (str(ROOT / "img"),
      "img")
 )
+
+# Bundled LGPL ffmpeg, so previews work on machines with no ffmpeg installed.
+# Vendored by scripts/fetch_ffmpeg.py rather than committed, so a build without
+# it still succeeds (previews just fall back to whatever ffmpeg is on PATH).
+_BIN_DIR = ROOT / "src" / "magnetoclip" / "resources" / "bin"
+if _BIN_DIR.is_dir() and any(_BIN_DIR.glob("ffmpeg*")):
+    datas.append((str(_BIN_DIR), "magnetoclip/resources/bin"))
+else:
+    print("WARNING: no bundled ffmpeg found in resources/bin; run "
+          "scripts/fetch_ffmpeg.py before releasing")
+
 ICON_PATH = str(ROOT / "src" / "magnetoclip" / "resources" / "icons" / "logo.ico")
 
 a = Analysis(

@@ -12,8 +12,10 @@ import time
 
 import pytest
 
+from magnetoclip.media import ffmpeg
 from magnetoclip.media.ffmpeg import (
     PREVIEW_ENCODERS,
+    FFmpegLocator,
     build_preview_proxy_command,
 )
 from magnetoclip.services.preview import proxy as preview_proxy
@@ -55,11 +57,164 @@ def test_proxy_command_covers_every_declared_encoder():
         )
 
         assert command[command.index("-c:v") + 1] == encoder
-        # libx264 takes -crf, mpeg4 would reject it.
-        if encoder == "mpeg4":
-            assert "-crf" not in command
-        else:
+        # libx264 takes -crf; libopenh264 and mpeg4 both reject it.
+        if encoder == "libx264":
             assert "-crf" in command
+        else:
+            assert "-crf" not in command
+
+
+def test_gpl_encoder_is_never_picked_for_an_lgpl_build(monkeypatch):
+    """Bundling libx264 would make the proprietary app GPL, so skip it.
+
+    The vendored LGPL build encodes H.264 with libopenh264 (BSD) instead, and
+    the GPL encoder must not even be attempted there.
+    """
+    monkeypatch.setattr(ffmpeg, "_ENCODER_CACHE", {})
+    monkeypatch.setattr(
+        ffmpeg,
+        "_supported_encoders",
+        lambda path: {"libopenh264", "mpeg4", "libdav1d", "aac"},
+    )
+
+    assert ffmpeg.preview_encoders("ffmpeg") == ("libopenh264", "mpeg4")
+
+
+def test_a_gpl_ffmpeg_still_gets_the_better_encoder(monkeypatch):
+    """A user-supplied GPL ffmpeg should not be downgraded unnecessarily."""
+    monkeypatch.setattr(ffmpeg, "_ENCODER_CACHE", {})
+    monkeypatch.setattr(
+        ffmpeg,
+        "_supported_encoders",
+        lambda path: {"libx264", "libopenh264", "mpeg4"},
+    )
+
+    assert ffmpeg.preview_encoders("ffmpeg") == (
+        "libx264",
+        "libopenh264",
+        "mpeg4",
+    )
+
+
+def test_encoder_detection_falls_back_when_unreadable(monkeypatch):
+    """An unusual build must still get a chance rather than losing previews."""
+    monkeypatch.setattr(ffmpeg, "_ENCODER_CACHE", {})
+    monkeypatch.setattr(ffmpeg, "_supported_encoders", lambda path: None)
+
+    assert ffmpeg.preview_encoders("ffmpeg") == PREVIEW_ENCODERS
+
+
+def test_encoder_detection_always_leaves_a_usable_encoder(monkeypatch):
+    """Even a build with none of the known encoders must fall back to mpeg4."""
+    monkeypatch.setattr(ffmpeg, "_ENCODER_CACHE", {})
+    monkeypatch.setattr(ffmpeg, "_supported_encoders", lambda path: {"h264_nvenc"})
+
+    assert ffmpeg.preview_encoders("ffmpeg") == ("mpeg4",)
+
+
+def test_encoder_list_is_parsed_from_ffmpeg_output(monkeypatch):
+    """The flags column is skipped; only real encoder names are collected."""
+    captured = {}
+
+    class _Result:
+        stdout = (
+            b"Encoders:\n"
+            b" V..... libx264              H.264\n"
+            b" V....D libopenh264          OpenH264 H.264\n"
+            b" A....D aac                  AAC\n"
+            b" ------ -------------------  ------\n"
+        )
+
+    def _run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _Result()
+
+    monkeypatch.setattr(ffmpeg, "_ENCODER_CACHE", {})
+    monkeypatch.setattr(ffmpeg.subprocess, "run", _run)
+
+    found = ffmpeg._supported_encoders("C:/ffmpeg.exe")
+
+    assert {"libx264", "libopenh264", "aac"} <= found
+    assert "Encoders:" not in found
+    assert "------" not in found
+    assert captured["cmd"][0] == "C:/ffmpeg.exe"
+
+
+def test_encoder_detection_result_is_cached(monkeypatch):
+    """It costs a process launch, so it must not run twice per binary."""
+    monkeypatch.setattr(ffmpeg, "_ENCODER_CACHE", {})
+    calls = []
+
+    class _Result:
+        stdout = b" V..... libopenh264  OpenH264\n"
+
+    def _run(cmd, **kwargs):
+        calls.append(cmd)
+        return _Result()
+
+    monkeypatch.setattr(ffmpeg.subprocess, "run", _run)
+
+    ffmpeg._supported_encoders("C:/ffmpeg.exe")
+    ffmpeg._supported_encoders("C:/ffmpeg.exe")
+
+    assert len(calls) == 1
+
+
+def test_bundled_binary_wins_over_path(monkeypatch, tmp_path):
+    """The vendored copy must take precedence so machines without ffmpeg work."""
+    bundled = tmp_path / "bin"
+    bundled.mkdir()
+    (bundled / "ffmpeg.exe").write_bytes(b"stub")
+    monkeypatch.setattr(ffmpeg, "bundled_bin_dir", lambda: bundled)
+
+    locator = FFmpegLocator(ffmpeg_path=None)
+
+    assert locator.ffmpeg_path == str(bundled / "ffmpeg.exe")
+    assert locator.ffmpeg_available
+
+
+def test_bundled_bin_dir_prefers_the_frozen_layout(monkeypatch, tmp_path):
+    """Frozen builds put resources under _MEIPASS, not next to the source."""
+    frozen = tmp_path / "frozen" / "magnetoclip" / "resources" / "bin"
+    frozen.mkdir(parents=True)
+    monkeypatch.setattr(ffmpeg.sys, "_MEIPASS", str(tmp_path / "frozen"), raising=False)
+
+    assert ffmpeg.bundled_bin_dir() == frozen
+
+
+def test_explicit_setting_still_overrides_the_bundled_binary(monkeypatch, tmp_path):
+    """A user pointing at their own ffmpeg must keep winning."""
+    bundled = tmp_path / "bin"
+    bundled.mkdir()
+    (bundled / "ffmpeg.exe").write_bytes(b"stub")
+    custom = tmp_path / "custom"
+    custom.mkdir()
+    (custom / "ffmpeg.exe").write_bytes(b"stub")
+    monkeypatch.setattr(ffmpeg, "bundled_bin_dir", lambda: bundled)
+
+    locator = FFmpegLocator(ffmpeg_path=str(custom / "ffmpeg.exe"))
+
+    assert locator.ffmpeg_path == str(custom / "ffmpeg.exe")
+
+
+def test_preview_works_with_only_ffmpeg_and_no_ffprobe(monkeypatch, tmp_path):
+    """ffprobe is deliberately not bundled; detection must not depend on it.
+
+    The no-frames watchdog covers codec detection, so the proxy path has to stay
+    available on a machine that has no ffprobe at all.
+    """
+    bundled = tmp_path / "bin"
+    bundled.mkdir()
+    (bundled / "ffmpeg.exe").write_bytes(b"stub")
+    monkeypatch.setattr(ffmpeg, "bundled_bin_dir", lambda: bundled)
+    # Simulate a machine with no ffmpeg tooling on PATH.
+    monkeypatch.setattr(ffmpeg.shutil, "which", lambda name: None)
+
+    locator = FFmpegLocator(ffmpeg_path=None)
+
+    assert locator.available is False, "ffprobe is absent"
+    assert locator.ffmpeg_available is True
+    assert locator.ffmpeg() == str(bundled / "ffmpeg.exe")
 
 
 def test_proxy_path_is_stable_and_invalidated_by_the_source(tmp_path):

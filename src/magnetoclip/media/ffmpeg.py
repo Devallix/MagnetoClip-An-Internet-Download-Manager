@@ -15,6 +15,7 @@ import math
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from magnetoclip.services.logging import get_logger
@@ -35,8 +36,24 @@ class FFmpegRunError(RuntimeError):
 
 
 def bundled_bin_dir() -> Path:
-    """Directory holding any binary shipped with the app (``resources/bin``)."""
-    return Path(__file__).resolve().parents[1] / "resources" / "bin"
+    """Directory holding any binary shipped with the app (``resources/bin``).
+
+    The app ships an LGPL ffmpeg so previews work on machines that have no
+    ffmpeg of their own. In a frozen build the modules live under ``_MEIPASS``;
+    from source they sit at ``src/magnetoclip/media/ffmpeg.py``.
+    """
+    candidates: list[Path] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "magnetoclip" / "resources" / "bin")
+    candidates.append(Path(__file__).resolve().parents[1] / "resources" / "bin")
+    for candidate in candidates:
+        try:
+            if candidate.is_dir():
+                return candidate
+        except OSError:
+            continue
+    return candidates[-1]
 
 
 def _exe(name: str) -> str:
@@ -122,14 +139,65 @@ def build_remux_command(
     ]
 
 
-# Rate-control flags per encoder, in preference order. libx264 gives the best
-# quality per bit; mpeg4 is compiled into every ffmpeg build, so it is the
-# safety net when libx264 is unavailable.
-PREVIEW_ENCODERS: tuple[str, ...] = ("libx264", "mpeg4")
+# Video encoders to try for a preview proxy, best first.
+#
+# libx264 is excluded from the bundled build on purpose: it is GPL, and shipping
+# it inside this proprietary app would impose GPL on the whole distribution.
+# The LGPL build instead encodes H.264 with libopenh264 (BSD), and every build
+# has mpeg4 as the last resort. Selecting by what the binary actually supports
+# keeps a system ffmpeg (often the GPL one) on the better encoder.
+PREVIEW_ENCODERS: tuple[str, ...] = ("libx264", "libopenh264", "mpeg4")
 _PREVIEW_ENCODER_ARGS: dict[str, list[str]] = {
     "libx264": ["-preset", "veryfast", "-crf", "30"],
+    "libopenh264": ["-b:v", "1200k", "-maxrate", "1400k", "-bufsize", "2400k"],
     "mpeg4": ["-q:v", "6"],
 }
+
+
+def _supported_encoders(ffmpeg: str) -> set[str] | None:
+    """Encoders *ffmpeg* reports, or None when the list cannot be read.
+
+    Result is cached per binary path: this runs once per preview proxy, and
+    probing costs a process launch.
+    """
+    cached = _ENCODER_CACHE.get(ffmpeg)
+    if cached is not None:
+        return cached or None
+    names: set[str] = set()
+    try:
+        result = subprocess.run(
+            [ffmpeg, "-hide_banner", "-loglevel", "error", "-encoders"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        _ENCODER_CACHE[ffmpeg] = set()
+        return None
+    for line in result.stdout.decode(errors="replace").splitlines():
+        # Lines look like " V....D libx264   H.264 ...".
+        parts = line.split()
+        if len(parts) >= 2 and len(parts[0]) == 6 and parts[0][0] in "VAS":
+            names.add(parts[1])
+    _ENCODER_CACHE[ffmpeg] = names
+    return names or None
+
+
+def preview_encoders(ffmpeg: str) -> tuple[str, ...]:
+    """The preview encoders to try against this *ffmpeg*, best first.
+
+    Falls back to every known encoder when the binary's list is unreadable, so
+    an unusual build still gets a chance rather than silently losing previews.
+    """
+    supported = _supported_encoders(ffmpeg)
+    if supported is None:
+        return PREVIEW_ENCODERS
+    usable = tuple(name for name in PREVIEW_ENCODERS if name in supported)
+    return usable or ("mpeg4",)
+
+
+_ENCODER_CACHE: dict[str, set[str]] = {}
 
 
 def build_preview_proxy_command(
@@ -366,13 +434,13 @@ def create_preview_proxy(
 ) -> Path:
     """Build a playable preview proxy for *src*; returns the proxy path.
 
-    Tries each encoder in :data:`PREVIEW_ENCODERS` in turn, so a build without
-    libx264 still produces something playable.
+    Encoders are tried best-first against what this ffmpeg actually supports, so
+    an LGPL build lands on libopenh264 without wasting a failed libx264 run.
     """
     ffmpeg = (locator or FFmpegLocator()).ffmpeg()
     destination = Path(dst)
     last_error = ""
-    for encoder in PREVIEW_ENCODERS:
+    for encoder in preview_encoders(ffmpeg):
         command = build_preview_proxy_command(
             ffmpeg,
             src,

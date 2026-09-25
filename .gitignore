@@ -8,6 +8,10 @@ build/
 dist/
 *.egg-info/
 .eggs/
+
+# Bundled LGPL ffmpeg, vendored by scripts/fetch_ffmpeg.py (~128 MB, too large
+# for git). Run that script before building a release.
+src/magnetoclip/resources/bin/
 wheels/
 
 # Virtual environments
@@ -43,3 +47,6 @@ env
 # LICENSE SERVER/LICENSE DATA
 license-server/
 license_data/
+
+#ignore this
+python_lessons.py
