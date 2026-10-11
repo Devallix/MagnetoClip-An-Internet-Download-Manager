@@ -184,6 +184,10 @@ class CompletionNotifier(QWidget):
 
         # The notifier itself is only a controller and is never shown; the
         # toasts are top-level overlay windows positioned in screen space.
+        # Hide explicitly: without it Qt still hit-tests this widget, and its
+        # default 100x30 geometry sits exactly over the menu bar's first
+        # actions, silently swallowing real mouse clicks on the Help menu.
+        self.hide()
         self._disconnect = context.events.connect(
             Events.NOTIFICATION_REQUESTED, self._on_notification
         )
