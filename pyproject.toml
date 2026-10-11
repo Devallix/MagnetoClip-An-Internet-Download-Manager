@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "magnetoclip"
-version = "0.2.7"
+version = "1.1.0"
 description = "Advanced Download Manager — Capture the Web."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,12 +12,14 @@ license = { text = "Proprietary" }
 dependencies = [
     "PySide6>=6.8",
     "httpx>=0.28",
+    "h2>=4.1",
     "SQLAlchemy>=2.0",
     "qasync>=0.28",
     "keyring>=25",
     "structlog>=26",
     "aiofiles>=25",
     "yt-dlp>=2026.7",
+    "curl-cffi>=0.10,<0.16",
     "cryptography>=46",
     "libtorrent>=2.0.13",
     "aiohttp>=3.14",

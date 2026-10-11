@@ -8,10 +8,10 @@ Behaves like uTorrent:
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
@@ -20,7 +20,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QMenu,
     QMessageBox,
-    QProgressBar,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -29,14 +28,21 @@ from PySide6.QtWidgets import (
 
 from magnetoclip.core.events.bus import Events
 
-from ..components.buttons import GhostButton, VerticalIconButton
+from ..components.buttons import VerticalIconButton
 from ..components.icons import text_icon, tool_icon
+from ..components.liquid_progress import LiquidProgressBar
 from ..dialogs.add_torrent import AddTorrentDialog
-from ..util import format_bytes, format_speed
+from ..util import format_speed
 from .base import Page
 
 ACTIVE = {"connecting", "downloading", "retrying", "verifying"}
 TERMINAL = {"completed", "failed", "verification_failed", "stopped"}
+
+# Progress events can fire several times per second per torrent, but the
+# manager persists them to the DB at most once a second. Re-reading the DB
+# inside that window returns the same row, so per-torrent UI refreshes are
+# throttled to roughly the DB cadence.
+_UI_PROGRESS_THROTTLE = 0.75
 
 
 class TorrentsPage(Page):
@@ -48,6 +54,11 @@ class TorrentsPage(Page):
         self._ids: list[int] = []
         self._snapshots: dict[int, dict] = {}
         self._empty_row: int | None = None
+        self._last_progress: dict[int, float] = {}
+        # Whether events changed the table since the last full refresh. The
+        # page stays live-subscribed while hidden, so ``refresh()`` only needs
+        # to run on nav when this is set (or until first build).
+        self._dirty = True
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(24, 16, 24, 16)
@@ -127,54 +138,6 @@ class TorrentsPage(Page):
         self.table.setColumnWidth(5, 80)
         outer.addWidget(self.table, 1)
 
-        # --- Torrent site links ---
-        sites_label = QLabel("Torrent Sites")
-        sites_label.setObjectName("page_subtitle")
-        outer.addWidget(sites_label)
-
-        sites_row = QHBoxLayout()
-        sites_row.setSpacing(8)
-        self._sites = [
-            (
-                "YTS",
-                "https://web.yts.gg/",
-                "Download torrent movies in HD",
-            ),
-            (
-                "EZTV",
-                "https://en.eztv-official.is/",
-                "Download torrent movies and TV shows",
-            ),
-            (
-                "The Pirate Bay",
-                "https://thepiratebay.org/",
-                "Download torrent files: movies, apps, documents, music and more",
-            ),
-            (
-                "1337x",
-                "https://www.1377x.to/",
-                "Download torrent files: movies, apps, documents, music and more",
-            ),
-        ]
-        for title, url, description in self._sites:
-            button = GhostButton(title)
-            button.setCursor(Qt.PointingHandCursor)
-            button.setToolTip(f"{description}\n{url}")
-            button.clicked.connect(
-                lambda checked=False, site_url=url: self._open_site(site_url)
-            )
-            sites_row.addWidget(button)
-        sites_row.addStretch(1)
-        outer.addLayout(sites_row)
-
-        sites_note = QLabel(
-            "Open a site to browse torrents, then add a magnet link or .torrent "
-            "file with the buttons above."
-        )
-        sites_note.setObjectName("card_caption")
-        sites_note.setWordWrap(True)
-        outer.addWidget(sites_note)
-
         events = context.events
         events.connect(Events.DOWNLOAD_ADDED, self._on_added)
         events.connect(Events.DOWNLOAD_UPDATED, self._on_updated)
@@ -182,12 +145,6 @@ class TorrentsPage(Page):
         events.connect(Events.PROGRESS_UPDATED, self._on_progress)
 
         self.refresh()
-
-    # ----- torrent site links -----
-
-    @staticmethod
-    def _open_site(url: str) -> None:
-        QDesktopServices.openUrl(QUrl(url))
 
     # ----- add routing -----
 
@@ -270,10 +227,16 @@ class TorrentsPage(Page):
         for snapshot in manager.list_snapshots(limit=2000):
             if self._matches(snapshot):
                 self._upsert(snapshot)
+        self._dirty = False
         self._update_empty_state()
+
+    def needs_refresh(self) -> bool:
+        """True when the table changed since the last full refresh."""
+        return self._dirty
 
     def _upsert(self, snapshot: dict) -> None:
         download_id = snapshot["id"]
+        self._dirty = True
         if not self._matches(snapshot):
             self._remove_row(download_id)
             self._update_empty_state()
@@ -306,7 +269,7 @@ class TorrentsPage(Page):
         layout = QHBoxLayout(widget)
         layout.setContentsMargins(6, 4, 10, 4)
         layout.setSpacing(8)
-        bar = QProgressBar()
+        bar = LiquidProgressBar()
         bar.setObjectName("status_bar")
         bar.setTextVisible(False)
         bar.setRange(0, 100)
@@ -315,6 +278,8 @@ class TorrentsPage(Page):
         percent.setObjectName("status_percent")
         layout.addWidget(bar, 1)
         layout.addWidget(percent)
+        widget.bar = bar
+        widget.percent = percent
         return widget
 
     def _populate_row(self, row: int, snapshot: dict) -> None:
@@ -334,8 +299,8 @@ class TorrentsPage(Page):
 
         cell = self.table.cellWidget(row, 3)
         if cell:
-            bar = cell.findChild(QProgressBar)
-            percent_label = cell.findChild(QLabel)
+            bar = getattr(cell, "bar", None)
+            percent_label = getattr(cell, "percent", None)
             if bar and percent_label:
                 if total and total > 0:
                     frac = downloaded / total
@@ -344,6 +309,14 @@ class TorrentsPage(Page):
                 else:
                     bar.setValue(0)
                     percent_label.setText("--")
+                if status == "paused":
+                    bar.set_state("paused")
+                elif status in ("completed",):
+                    bar.set_state("completed")
+                elif status in ("failed", "verification_failed"):
+                    bar.set_state("failed")
+                else:
+                    bar.set_state("downloading")
 
         if status in ACTIVE:
             self.table.item(row, 2).setText("Downloading")
@@ -377,6 +350,7 @@ class TorrentsPage(Page):
             self.table.item(row, 6).setText("--")
 
     def _remove_row(self, download_id: int) -> None:
+        self._dirty = True
         row = self._rows.pop(download_id, None)
         if row is None:
             return
@@ -529,10 +503,15 @@ class TorrentsPage(Page):
     def _on_progress(self, payload: Any) -> None:
         if not isinstance(payload, dict):
             return
+        download_id = payload["id"]
+        now = time.monotonic()
+        if now - self._last_progress.get(download_id, 0.0) < _UI_PROGRESS_THROTTLE:
+            return
+        self._last_progress[download_id] = now
         manager = getattr(self.context, "manager", None)
         if manager is None:
             return
-        download = manager.get_download(payload["id"])
+        download = manager.get_download(download_id)
         if download is not None:
             snapshot = manager.snapshot_item(download)
             if self._matches(snapshot):

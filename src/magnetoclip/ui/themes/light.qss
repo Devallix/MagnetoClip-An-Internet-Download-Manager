@@ -429,6 +429,7 @@ QToolButton#nav_button[tint="completed"] { color: #059669; }
 QToolButton#nav_button[tint="analytics"] { color: #DB2777; }
 QToolButton#nav_button[tint="categories"] { color: #6366F1; }
 QToolButton#nav_button[tint="browser"] { color: #0284C7; }
+QToolButton#nav_button[tint="sites"] { color: #0E7490; }
 QToolButton#nav_button[tint="settings"] { color: #EA580C; }
 QToolButton#nav_button[tint="about"] { color: #C026D3; }
 
@@ -522,7 +523,7 @@ QLabel#sidebar_all_title {
     color: $text;
 }
 
-QTableWidget#downloads_table, QTableWidget#schedules_table {
+QTableWidget#downloads_table, QTableWidget#schedules_table, QTableWidget#sites_table {
     background-color: $surface;
     alternate-background-color: $surface_alt;
     border: 1px solid $border;
@@ -530,17 +531,17 @@ QTableWidget#downloads_table, QTableWidget#schedules_table {
     gridline-color: transparent;
 }
 
-QTableWidget#downloads_table::item, QTableWidget#schedules_table::item {
+QTableWidget#downloads_table::item, QTableWidget#schedules_table::item, QTableWidget#sites_table::item {
     padding: 6px;
     border: none;
     border-bottom: 1px solid $border;
 }
 
-QTableWidget#downloads_table::item:hover, QTableWidget#schedules_table::item:hover {
+QTableWidget#downloads_table::item:hover, QTableWidget#schedules_table::item:hover, QTableWidget#sites_table::item:hover {
     background-color: rgba(124, 58, 237, 0.06);
 }
 
-QTableWidget#downloads_table::item:selected, QTableWidget#schedules_table::item:selected {
+QTableWidget#downloads_table::item:selected, QTableWidget#schedules_table::item:selected, QTableWidget#sites_table::item:selected {
     background-color: rgba(124, 58, 237, 0.1);
     color: $text;
 }
@@ -562,16 +563,47 @@ QTableWidget#downloads_table::indicator:checked, QTableWidget#schedules_table::i
     border-radius: 4px;
 }
 
+/* ----- download sites page ----- */
+
+QTabWidget#sites_tabs::pane {
+    border: none;
+    background: transparent;
+    top: -1px;
+}
+
+QTabWidget#sites_tabs QTabBar::tab {
+    background-color: transparent;
+    color: $text_muted;
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 8px 8px 0 0;
+    margin-right: 4px;
+    padding: 8px 18px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+QTabWidget#sites_tabs QTabBar::tab:hover {
+    background-color: $surface_alt;
+    color: $text;
+}
+
+QTabWidget#sites_tabs QTabBar::tab:selected {
+    background-color: $surface_alt;
+    color: $accent_cyan;
+    border-bottom: 2px solid $accent_cyan;
+}
+
 QProgressBar#status_bar {
     background-color: $surface_alt;
     border: none;
-    border-radius: 4px;
-    min-height: 8px;
-    max-height: 8px;
+    border-radius: 6px;
+    min-height: 12px;
+    max-height: 12px;
 }
 
 QProgressBar#status_bar::chunk {
-    border-radius: 4px;
+    border-radius: 6px;
 }
 
 QProgressBar#status_bar::chunk[state="downloading"] {
@@ -783,4 +815,82 @@ QMenu::separator {
     height: 1px;
     background-color: $border;
     margin: 4px 8px;
+}
+
+/* ----- youtube quality dialog ----- */
+
+QFrame#quality_header {
+    background-color: rgba(124, 58, 237, 0.08);
+    border: 1px solid rgba(124, 58, 237, 0.30);
+    border-radius: 12px;
+}
+
+QLabel#quality_status {
+    color: $text;
+}
+
+QLabel#quality_status[kind="error"] {
+    color: $danger;
+}
+
+QScrollArea#quality_scroll {
+    border: none;
+    background: transparent;
+}
+
+QScrollArea#quality_scroll > QWidget > QWidget#quality_options {
+    background: transparent;
+}
+
+QPushButton#quality_card {
+    background-color: $surface_alt;
+    border: 1px solid $border;
+    border-radius: 10px;
+    padding: 0;
+    text-align: left;
+}
+
+QPushButton#quality_card:hover {
+    background-color: $surface;
+    border-color: $accent_blue;
+}
+
+QPushButton#quality_card:checked {
+    background-color: rgba(124, 58, 237, 0.10);
+    border-color: $accent;
+}
+
+QPushButton#quality_card QLabel {
+    background: transparent;
+}
+
+QLabel#quality_resolution {
+    font-size: 15px;
+    font-weight: 700;
+    color: $text;
+}
+
+QLabel#quality_resolution_best {
+    font-size: 15px;
+    font-weight: 700;
+    color: $accent;
+}
+
+QPushButton#quality_card:checked QLabel#quality_resolution_best {
+    color: $accent_cyan;
+}
+
+QLabel#quality_format {
+    font-size: 12px;
+    color: $text_muted;
+}
+
+QLabel#quality_size {
+    font-size: 12px;
+    font-weight: 600;
+    color: $text_muted;
+}
+
+QPushButton#quality_card:checked QLabel#quality_size {
+    color: $accent_cyan;
 }

@@ -28,11 +28,11 @@ class TorrentResumeState:
         path.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
 
     @classmethod
-    def load(cls, path: Path) -> TorrentResumeState | None:
+    def load(cls, path: Path | str) -> TorrentResumeState | None:
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
             return cls.from_dict(data)
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError, TypeError):
             return None
 
     def to_dict(self) -> dict[str, Any]:

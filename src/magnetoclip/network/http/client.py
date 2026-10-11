@@ -18,6 +18,7 @@ class ClientConfig:
     timeout: float = 30.0
     max_connections: int = 64
     max_keepalive: int = 24
+    http2: bool = True
     proxy: ProxySpec | None = None
     auth: AuthSpec | None = None
     headers: dict[str, str] = field(default_factory=dict)
@@ -43,6 +44,7 @@ def build_client(
         ),
         "follow_redirects": True,
         "verify": config.verify_tls,
+        "http2": config.http2,
     }
 
     if config.cookies:

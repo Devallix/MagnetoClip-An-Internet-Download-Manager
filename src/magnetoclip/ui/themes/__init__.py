@@ -46,8 +46,10 @@ def apply_theme(window: QMainWindow, *, theme: str = "dark") -> None:
         app.style().unpolish(widget)
         app.style().polish(widget)
     from magnetoclip.ui.components.icons import set_theme as _set_icon_theme
+    from magnetoclip.ui.components.liquid_progress import set_theme as _set_liquid_theme
 
     _set_icon_theme(theme)
+    _set_liquid_theme(theme)
     window.update()
 
 

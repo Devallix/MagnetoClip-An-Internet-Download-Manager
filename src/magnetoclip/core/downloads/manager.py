@@ -20,21 +20,32 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from ...app.context import AppContext
-from ...database.models import Download, DownloadStatus
-from ...database.repositories import DownloadRepository
+from ...database.models import Download, DownloadStatus, Playlist, PlaylistItem
+from ...database.repositories import DownloadRepository, PendingCaptureRepository
 from ...engine.downloader.engine import MagnetoCore, spec_from_url
 from ...engine.resume.mclip import MClipState
 from ...intelligence import SpeedPredictor
+from ...media.models import RequestContext
 from ...media.streaming import (
     DownloadCancelled,
     StreamResolutionError,
     download_stream,
     is_audio_platform,
+    is_bot_wall_error,
+    is_hls_or_dash_url,
+    is_hls_url,
+    is_streaming_site_url,
     is_streaming_url,
     resolve_stream,
+)
+from ...media.youtube.types import (
+    PlaylistItemStatus,
+    PlaylistVideo,
+    YouTubePlaylist,
 )
 from ...network.http.client import ClientConfig
 from ...security.safe_names import safe_join, sanitize_filename
@@ -43,6 +54,7 @@ from ...torrent.client import TorrentClient
 from ...torrent.client import available as torrent_available
 from ...torrent.detect import is_magnet_link, is_torrent_file_url, is_torrent_url
 from ...torrent.handler import TorrentDownloadHandler
+from ...torrent.resume import sidecar_path_for
 from ...torrent.types import TorrentSpec
 from ..events.bus import Events
 from ..torrent_queue import TorrentQueue
@@ -119,20 +131,18 @@ class DownloadManager:
         if not torrent_available():
             log.info("torrent_unavailable")
             return
+        # Reuse the session created during app startup so we don't spin up a
+        # second session fighting for the same listen port / DHT pool.
+        existing = getattr(self.context, "torrent_client", None)
+        if existing is not None:
+            self._torrent_client = existing
+            return
         try:
             from ...torrent.client import ClientConfig as TConfig
 
-            config = TConfig(
-                listen_port=int(self.settings.get("torrent.listen_port", 6881)),
-                enable_dht=bool(self.settings.get("torrent.enable_dht", True)),
-                enable_pex=bool(self.settings.get("torrent.enable_pex", True)),
-                enable_encryption=bool(
-                    self.settings.get("torrent.enable_encryption", True)
-                ),
-                max_connections=int(self.settings.get("torrent.max_connections", 200)),
-                max_uploads=int(self.settings.get("torrent.max_uploads", 4)),
-            )
+            config = TConfig.from_settings(self.settings)
             self._torrent_client = TorrentClient(config)
+            self.context.torrent_client = self._torrent_client
         except Exception as exc:
             log.warning("torrent_client_init_failed", error=str(exc))
             self._torrent_client = None
@@ -156,16 +166,33 @@ class DownloadManager:
         auth_password: str | None = None,
         cookies: dict[str, str] | None = None,
         data: bytes | None = None,
+        data_path: Path | None = None,
         archive: bool = False,
+        playlist_id: str | None = None,
+        playlist_title: str | None = None,
+        playlist_item_index: int | None = None,
+        request_context=None,
+        youtube_quality: str | None = None,
+        youtube_height: int | None = None,
+        youtube_width: int | None = None,
+        youtube_fps: int | None = None,
+        youtube_format: str | None = None,
+        youtube_format_selector: str | None = None,
+        youtube_merge_output_format: str | None = None,
+        youtube_format_label: str | None = None,
+        youtube_requested_quality: str | None = None,
     ) -> Download:
         """Validate the URL and persist a new download record.
 
         ``data`` lets a capture hand over in-memory bytes (e.g. a Telegram
-        ``blob:`` image the extension fetched for us). When set, no network
-        request happens: the bytes are written straight to disk and the record
-        is created as completed. The URL may then be a ``blob:`` URI.
+        ``blob:`` image the extension fetched for us). ``data_path`` does the
+        same for a file the browser already downloaded to disk (the Chrome
+        downloads fallback for one-shot Telegram stream links): one of the two
+        means no network request happens, the bytes are written straight to
+        disk and the record is created as completed. The URL may then be a
+        ``blob:`` URI or a non-fetchable session URL.
         """
-        if data is None:
+        if data is None and data_path is None:
             self._validate_url(url)
         torrent = is_torrent_url(url)
         name = sanitize_filename(filename) if filename else self._derive_name(url)
@@ -198,7 +225,7 @@ class DownloadManager:
             return substitute
 
         connections = connections_max or int(
-            self.settings.get("downloads.connections_per_download", 8)
+            self.settings.get("downloads.connections_per_download", 16)
         )
         auth_ref = self._store_auth_ref(auth_username, auth_password)
         if proxy_profile_id is None:
@@ -208,6 +235,11 @@ class DownloadManager:
         if data is not None:
             final_path.parent.mkdir(parents=True, exist_ok=True)
             final_path.write_bytes(data)
+        elif data_path is not None:
+            import shutil
+
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(data_path, final_path)
         with self.session_factory() as session:
             repo = DownloadRepository(session)
             download = repo.add(
@@ -222,11 +254,33 @@ class DownloadManager:
                 hash_expected=hash_expected,
                 proxy_profile_id=proxy_profile_id,
                 auth_ref=auth_ref,
+                stream_context=(
+                    request_context.to_dict()
+                    if request_context is not None
+                    else None
+                ),
+                playlist_id=playlist_id,
+                playlist_title=playlist_title,
+                playlist_item_index=playlist_item_index,
+                youtube_quality=youtube_quality,
+                youtube_height=youtube_height,
+                youtube_width=youtube_width,
+                youtube_fps=youtube_fps,
+                youtube_format=youtube_format,
+                youtube_format_selector=youtube_format_selector,
+                youtube_merge_output_format=youtube_merge_output_format,
+                youtube_format_label=youtube_format_label,
+                youtube_requested_quality=youtube_requested_quality,
             )
             if data is not None:
                 download.status = DownloadStatus.completed
                 download.size_total = len(data)
                 download.size_downloaded = len(data)
+                download.completed_at = datetime.now(UTC)
+            elif data_path is not None:
+                download.status = DownloadStatus.completed
+                download.size_total = int(final_path.stat().st_size)
+                download.size_downloaded = download.size_total
                 download.completed_at = datetime.now(UTC)
             from ...media.detect import detect_type
 
@@ -258,6 +312,187 @@ class DownloadManager:
             self._run_archiving(download.id, url, final_path.parent)
             return download
         return download
+
+    def add_playlist(
+        self,
+        playlist: YouTubePlaylist,
+        videos: list[PlaylistVideo] | None = None,
+        *,
+        save_dir: Path | str | None = None,
+        category_name: str | None = None,
+        connections_max: int | None = None,
+        headers: dict[str, str] | None = None,
+        cookies: dict[str, str] | None = None,
+        youtube_quality: str | None = None,
+    ) -> list[tuple[PlaylistVideo, Download]]:
+        """Queue *selected* playlist videos as individual downloads.
+
+        Each video becomes its own ``Download`` row through the normal
+        single-video pipeline (streaming, progress events, notifications),
+        grouped under one ``Playlist`` row and - when ``playlist.create_folder``
+        is enabled - inside a ``<playlist title>`` folder. Returns
+        ``(video, download)`` pairs in playlist order.
+        """
+        videos = list(videos if videos is not None else playlist.selected())
+        if not videos:
+            return []
+        playlist_id = playlist.playlist_id
+        playlist_title = playlist.title or playlist_id
+        base_dir = self._resolve_save_dir(save_dir, None)
+        if bool(self.settings.get("playlist.create_folder", True)):
+            folder = sanitize_filename(playlist_title) or "playlist"
+            base_dir = base_dir / folder
+        base_dir.mkdir(parents=True, exist_ok=True)
+
+        with self.session_factory() as session:
+            playlist_row = session.scalar(
+                select(Playlist).where(Playlist.playlist_id == playlist_id)
+            )
+            if playlist_row is None:
+                playlist_row = Playlist(
+                    playlist_id=playlist_id,
+                    title=playlist.title,
+                    url=playlist.watch_url(),
+                    video_count=len(videos),
+                )
+                session.add(playlist_row)
+                session.commit()
+
+        created: list[tuple[PlaylistVideo, Download]] = []
+        for video in videos:
+            download = self.add(
+                video.url,
+                save_dir=base_dir,
+                category_name=category_name,
+                connections_max=connections_max,
+                headers=headers,
+                cookies=cookies,
+                playlist_id=playlist_id,
+                playlist_title=playlist_title,
+                playlist_item_index=video.index,
+                youtube_quality=youtube_quality,
+                youtube_requested_quality=youtube_quality,
+            )
+            with self.session_factory() as session:
+                item = session.scalar(
+                    select(PlaylistItem).where(
+                        PlaylistItem.playlist_id == playlist_row.id,
+                        PlaylistItem.video_id == video.video_id,
+                    )
+                )
+                if item is None:
+                    item = PlaylistItem(
+                        playlist_id=playlist_row.id,
+                        video_id=video.video_id,
+                        title=video.title,
+                        url=video.url,
+                        index=video.index,
+                        duration=video.duration,
+                        status="added",
+                        download_id=download.id,
+                        requested_quality=youtube_quality,
+                    )
+                    session.add(item)
+                else:
+                    item.download_id = download.id
+                    item.status = "added"
+                    item.error = None
+                    item.title = video.title
+                    item.duration = video.duration
+                    if youtube_quality:
+                        item.requested_quality = youtube_quality
+                session.commit()
+            video.status = PlaylistItemStatus.added
+            created.append((video, download))
+        return created
+
+    def _sync_playlist_item(
+        self, download: Download, status: str, error: str | None = None
+    ) -> None:
+        """Mirror a terminal state onto the ``PlaylistItem`` of a playlist video."""
+        playlist_item_index = download.playlist_item_index
+        if not download.playlist_id or playlist_item_index is None:
+            return
+        with self.session_factory() as session:
+            item = session.scalar(
+                select(PlaylistItem)
+                .join(Playlist, PlaylistItem.playlist_id == Playlist.id)
+                .where(
+                    Playlist.playlist_id == download.playlist_id,
+                    PlaylistItem.index == playlist_item_index,
+                )
+            )
+            if item is None:
+                return
+            item.status = status
+            item.error = error
+            session.commit()
+
+    def _sync_playlist_item(
+        self, download: Download, status: str, error: str | None = None
+    ) -> None:
+        """Mirror a terminal state onto the ``PlaylistItem`` of a playlist video."""
+        playlist_item_index = download.playlist_item_index
+        if not download.playlist_id or playlist_item_index is None:
+            return
+        with self.session_factory() as session:
+            item = session.scalar(
+                select(PlaylistItem)
+                .join(Playlist, PlaylistItem.playlist_id == Playlist.id)
+                .where(
+                    Playlist.playlist_id == download.playlist_id,
+                    PlaylistItem.index == playlist_item_index,
+                )
+            )
+            if item is None:
+                return
+            item.status = status
+            item.error = error
+            video_id = item.video_id
+            session.commit()
+        if status == "completed" and video_id:
+            self._playlist_archive().add(video_id)
+
+    def _sync_playlist_actual_quality(
+        self, download: Download, height: int | None
+    ) -> None:
+        """Mirror a download's post-probe actual resolution onto its item."""
+        if not download.playlist_id or download.playlist_item_index is None:
+            return
+        if not height:
+            return
+        from ...media.youtube.formats import display_height
+
+        label = display_height(height)
+        with self.session_factory() as session:
+            item = session.scalar(
+                select(PlaylistItem)
+                .join(Playlist, PlaylistItem.playlist_id == Playlist.id)
+                .where(
+                    Playlist.playlist_id == download.playlist_id,
+                    PlaylistItem.index == download.playlist_item_index,
+                )
+            )
+            if item is None:
+                return
+            item.actual_quality = label
+            session.commit()
+
+    def _playlist_archive(self) -> Any:
+        """The persistent YouTube video-id archive under the app data dir."""
+        from ...media.youtube.archive import PlaylistArchive
+
+        archive = getattr(self, "_playlist_archive_cache", None)
+        if archive is None:
+            archive = PlaylistArchive(
+                self.context.data_dir / "archives" / "youtube.txt"
+            )
+            self._playlist_archive_cache = archive
+        return archive
+
+    def archived_youtube_ids(self, limit: int = 10_000) -> set[str]:
+        """Video ids already in the YouTube archive (used to pre-skip previews)."""
+        return self._playlist_archive().ids()
 
     def _run_archiving(self, download_id: int, url: str, save_dir: Path) -> None:
         """Archive a webpage URL for the given download (off-thread)."""
@@ -510,6 +745,12 @@ class DownloadManager:
             return False
 
         if is_streaming_url(download.url):
+            log.info(
+                "stream_start_dispatch",
+                download_id=download_id,
+                semaphore_available=getattr(self.semaphore, "_value", None),
+                active_tasks=len(self._tasks),
+            )
             return self._start_streaming(download_id)
 
         spec = self._build_spec(download)
@@ -720,7 +961,7 @@ class DownloadManager:
         for download_id in download_ids:
             try:
                 self.resume(download_id)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.warning("resume_all_failed", id=download_id, exc_info=True)
 
     # ----- execution -----
@@ -746,6 +987,12 @@ class DownloadManager:
     # ----- streaming (yt-dlp) execution -----
 
     def _start_streaming(self, download_id: int) -> bool:
+        log.info(
+            "stream_start_requested",
+            download_id=download_id,
+            semaphore_available=getattr(self.semaphore, "_value", None),
+            active_tasks=len(self._tasks),
+        )
         with self.session_factory() as session:
             repo = DownloadRepository(session)
             download = repo.get(download_id)
@@ -758,13 +1005,28 @@ class DownloadManager:
                 session.commit()
         task = asyncio.create_task(self._run_streaming(download_id))
         self._tasks[download_id] = task
+        log.info(
+            "stream_task_created",
+            download_id=download_id,
+            semaphore_available=getattr(self.semaphore, "_value", None),
+        )
         task.add_done_callback(lambda _: self._tasks.pop(download_id, None))
         return True
 
     async def _run_streaming(self, download_id: int) -> None:
         """Download an embedded/streaming URL with yt-dlp, mirroring events into
         the normal progress/state pipeline so the DB and UI stay in sync."""
+        log.info(
+            "stream_waiting_for_slot",
+            download_id=download_id,
+            semaphore_available=getattr(self.semaphore, "_value", None),
+        )
         async with self.semaphore:
+            log.info(
+                "stream_slot_acquired",
+                download_id=download_id,
+                semaphore_available=getattr(self.semaphore, "_value", None),
+            )
             cancel_event = threading.Event()
             self._stream_cancel[download_id] = cancel_event
             try:
@@ -783,14 +1045,62 @@ class DownloadManager:
                     )
                     save_dir.mkdir(parents=True, exist_ok=True)
                     cookies = self._stream_cookies(download)
+                    headers = self._stream_headers(download)
                 quality = str(
                     self.settings.get("streaming.quality", "best") or "best"
+                )
+                # Per-download YouTube selection (chosen against the real ladder
+                # in the quality dialog) overrides the global quality setting.
+                requested_quality = None
+                format_selector = None
+                merge_output_format = None
+                with self.session_factory() as session:
+                    row = DownloadRepository(session).get(download_id)
+                    if row is not None and row.youtube_format_selector:
+                        format_selector = row.youtube_format_selector
+                        merge_output_format = (
+                            row.youtube_merge_output_format or None
+                        )
+                        requested_quality = (
+                            row.youtube_requested_quality or None
+                        )
+                    elif row is not None and row.youtube_requested_quality:
+                        # Playlist / settings-default path: no per-video ladder
+                        # was resolved, so build the standalone selector. The
+                        # ``[height<=N]`` rule gives lower-if-unavailable.
+                        from ...media.youtube.formats import (
+                            build_standalone_selector,
+                        )
+
+                        requested_quality = row.youtube_requested_quality
+                        format_selector = build_standalone_selector(
+                            requested_quality
+                        )
+                        if "+" in format_selector:
+                            merge_output_format = "mp4"
+                browser_assist = bool(
+                    self.settings.get("streaming.browser_assist", False)
                 )
 
                 self.events.post(
                     Events.DOWNLOAD_STATE_CHANGED,
                     {"id": download_id, "state": "connecting"},
                 )
+
+                # Browser-assisted HLS: streaming-site CDNs sit behind
+                # Cloudflare "Managed Challenge", which no HTTP library passes.
+                # When the extension is connected, fetch manifests/segments from
+                # Chrome itself (which clears the challenge naturally), falling
+                # back to yt-dlp on any pre-download failure so non-Cloudflare
+                # manifest hosts keep working without the browser.
+                # NOTE: yt-dlp with impersonation is tried first. Browser-assist
+                # is used as a fallback when yt-dlp hits any Cloudflare block.
+                # The challenge frequently answers with HTTP 200 + an HTML
+                # challenge page, so yt-dlp reports "Unsupported URL"/"no video
+                # formats" rather than an obvious 403 -- no bot-wall token in
+                # the message. Fall back to the browser on ANY manifest-URL
+                # failure (that path returns None when the browser cannot help,
+                # so plain non-Cloudflare m3u8 hosts stay on yt-dlp).
 
                 # Resume: when a previous run left a partial file behind, reuse
                 # the stored filename so yt-dlp continues appending to the same
@@ -812,12 +1122,74 @@ class DownloadManager:
                         for _ in existing_path.parent.glob(pattern)
                     )
                 )
+                if (
+                    not partial
+                    and bool(self.settings.get("streaming.page_sniff", True))
+                    and is_streaming_site_url(url)
+                    and not is_hls_or_dash_url(url)
+                ):
+                    # In-app page → manifest sniffing: when a streaming-site page
+                    # URL is pasted directly, fetch its HTML in-process and scan
+                    # for an embedded .m3u8/.mpd reference so the HLS engine (or
+                    # yt-dlp) can start on the manifest immediately. When the page
+                    # is behind a Cloudflare challenge the scan finds nothing and
+                    # we fall through to the yt-dlp + browser-assist paths as
+                    # before. The page URL becomes the Referer so tokenized CDNs
+                    # accept the subsequent manifest/segment requests.
+                    sniffed = await self._sniff_stream_page(url, headers)
+                    if sniffed is not None:
+                        log.info(
+                            "page_sniff_resolved",
+                            id=download_id,
+                            url=url,
+                            manifest=sniffed.manifest_url,
+                        )
+                        url = sniffed.manifest_url
+                        headers = dict(headers or {})
+                        headers.setdefault(
+                            "Referer", sniffed.referer or sniffed.page_url
+                        )
+
+                # HLS-first path: once an actual M3U8 has been discovered,
+                # prefer the dedicated browser-assisted HLS engine. yt-dlp is
+                # the fallback, not the primary transport. This matters for
+                # streaming-site CDNs whose segment URLs are valid in Chrome
+                # but rejected when replayed by a generic HTTP client.
+                if (
+                    browser_assist
+                    and is_hls_url(url)
+                    and not partial
+                ):
+                    log.info(
+                        "hls_engine_start",
+                        id=download_id,
+                        url=url,
+                        quality=quality,
+                    )
+                    hls_path = await self._run_browser_stream(
+                        download_id,
+                        url,
+                        save_dir,
+                        quality,
+                        headers,
+                        cancel_event,
+                        existing_path,
+                    )
+                    if hls_path is not None:
+                        self._finalize_stream(download_id, "completed", hls_path)
+                        return
+
                 if partial:
                     info = None
                     filename = existing_path.name
                 else:
+                    resolve_kwargs = dict(cookies=cookies, headers=headers)
+                    if format_selector:
+                        resolve_kwargs["format_selector"] = format_selector
+                    if merge_output_format:
+                        resolve_kwargs["merge_output_format"] = merge_output_format
                     info = await asyncio.to_thread(
-                        resolve_stream, url, quality, cookies=cookies
+                        resolve_stream, url, quality, **resolve_kwargs
                     )
                     filename = f"{info.title}.{info.ext}"
 
@@ -826,6 +1198,14 @@ class DownloadManager:
                     download = repo.get(download_id)
                     if download is None:
                         return
+                    if (
+                        info is not None
+                        and download.playlist_id
+                        and download.playlist_item_index is not None
+                    ):
+                        filename = (
+                            f"{download.playlist_item_index:02d} - {filename}"
+                        )
                     download.filename = filename
                     download.save_path = str(save_dir / filename)
                     if info is not None:
@@ -834,11 +1214,11 @@ class DownloadManager:
                             download.size_total = info.size
                     session.commit()
 
-                self.events.post(
-                    Events.DOWNLOAD_STATE_CHANGED,
-                    {"id": download_id, "state": "downloading"},
-                )
-
+                stream_kwargs = dict(cookies=cookies, headers=headers, filename=filename)
+                if format_selector:
+                    stream_kwargs["format_selector"] = format_selector
+                if merge_output_format:
+                    stream_kwargs["merge_output_format"] = merge_output_format
                 final_path = await asyncio.to_thread(
                     download_stream,
                     url,
@@ -846,8 +1226,7 @@ class DownloadManager:
                     quality,
                     self._make_stream_progress(download_id),
                     cancel_event,
-                    cookies=cookies,
-                    filename=filename,
+                    **stream_kwargs,
                 )
 
                 self._finalize_stream(download_id, "completed", final_path)
@@ -855,8 +1234,48 @@ class DownloadManager:
                 if not self._db_status_is(download_id, DownloadStatus.paused):
                     self._update_db_status(download_id, DownloadStatus.stopped)
             except StreamResolutionError as exc:
+                # Browser-assist fallback: when yt-dlp hits a Cloudflare
+                # bot-wall on an m3u8 URL, try fetching via the browser.
+                if (
+                    browser_assist
+                    and (is_hls_or_dash_url(url) or is_bot_wall_error(str(exc)))
+                ):
+                    log.info(
+                        "browser_assist_fallback_resolution",
+                        id=download_id,
+                        url=url,
+                        error=str(exc)[:200],
+                    )
+                    final_path = await self._run_browser_stream(
+                        download_id, url, save_dir, quality, headers,
+                        cancel_event, existing_path,
+                    )
+                    if final_path is not None:
+                        self._delete_parts(download_id)
+                        self._finalize_stream(download_id, "completed", final_path)
+                        return
                 self._fail_stream(download_id, f"stream resolution failed: {exc}")
             except Exception as exc:  # noqa: BLE001 - stream pipeline failure
+                # Browser-assist fallback: when yt-dlp download fails with a
+                # Cloudflare bot-wall on an m3u8 URL, try via the browser.
+                if (
+                    browser_assist
+                    and (is_hls_or_dash_url(url) or is_bot_wall_error(str(exc)))
+                ):
+                    log.info(
+                        "browser_assist_fallback_download",
+                        id=download_id,
+                        url=url,
+                        error=str(exc)[:200],
+                    )
+                    final_path = await self._run_browser_stream(
+                        download_id, url, save_dir, quality, headers,
+                        cancel_event, existing_path,
+                    )
+                    if final_path is not None:
+                        self._delete_parts(download_id)
+                        self._finalize_stream(download_id, "completed", final_path)
+                        return
                 log.warning("stream_download_failed", id=download_id, error=str(exc))
                 self._fail_stream(download_id, f"stream download failed: {exc}")
             finally:
@@ -873,29 +1292,244 @@ class DownloadManager:
 
         return parse_cookie_header(cookie) or None
 
+    @staticmethod
+    def _stream_headers(download) -> dict[str, str] | None:
+        """Extra request headers (e.g. the player-page ``Referer``) captured by
+        the extension and stored on the download record. The ``Cookie`` header
+        is excluded here -- cookies travel through the yt-dlp cookiefile."""
+        headers = dict(download.headers_json or {})
+        headers.pop("cookie", None)
+        return headers or None
+
+    @staticmethod
+    def _stream_request_context(download) -> RequestContext:
+        """Rebuild the capture-time stream context (headers, cookies, page and
+        frame URLs) persisted on a streaming download record.
+
+        Consumed by the HLS pipeline (analyzer/download engine) started from a
+        confirmed browser capture, where the extension is provably alive.
+        """
+        return RequestContext.from_download(download)
+
+    def _prefer_player_host_sibling(
+        self,
+        download_id: int,
+        url: str,
+        headers: dict[str, str] | None,
+    ) -> str | None:
+        """Return a player-host sibling URL from the same page-scan batch as
+        *url*, or ``None``.
+
+        The ``fetch.*`` CDN master manifest 403s behind Cloudflare's bot-wall —
+        only the player iframe (which holds the session cookie) can clear it.
+        The same page scan also captured the player-host (``megaplay.*``)
+        sibling, the host that already produced completed downloads (DB IDs
+        159/164). Promote that sibling instead of retrying a host that is known
+        to 403. Matching uses the player-page ``Referer`` captured on the
+        capture rows, so only the same-episode sibling is promoted.
+        """
+        from urllib.parse import urlparse
+
+        referer = None
+        try:
+            referer = (headers or {}).get("Referer")
+        except Exception:  # pragma: no cover - defensive
+            referer = None
+        if not referer:
+            return None
+        with self.session_factory() as session:
+            captures = PendingCaptureRepository(session).pending(limit=500)
+        for capture in captures:
+            candidate = (capture.url or "").strip()
+            if not candidate or candidate == url:
+                continue
+            # The fetch.* CDN manifest is referred BY the player page; the
+            # usable sibling is the player-host URL that matches that Referer.
+            if candidate != referer:
+                continue
+            host = (urlparse(candidate).hostname or "").lower()
+            if "megaplay" in host or "player" in host:
+                return candidate
+        return None
+
+    async def _sniff_stream_page(
+        self,
+        url: str,
+        headers: dict[str, str] | None,
+    ) -> Any:
+        """Fetch a streaming-site page in-process and return its embedded HLS/DASH
+        manifest (:class:`SniffResult`), or ``None`` when the page carries none
+        (e.g. a Cloudflare challenge page) or is unreachable.
+
+        The manager supplies the transport (browser UA + ``follow_redirects``),
+        keeping the sniff module network-free and deterministic to test.
+        """
+        from ...media.hls.sniff import PageSniffError, sniff_page_manifest
+
+        request_headers: dict[str, str] = {
+            "User-Agent": str(self.settings.get("network.user_agent", "MagnetoClip/0.1")),
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+        for key, value in (headers or {}).items():
+            if key.lower() in {"referer", "user-agent", "cookie"}:
+                request_headers[key] = value
+
+        async def _fetch(page_url: str) -> tuple[str, str]:
+            timeout = httpx.Timeout(
+                float(self.settings.get("network.timeout_seconds", 15))
+            )
+            async with httpx.AsyncClient(
+                timeout=timeout, follow_redirects=True, headers=request_headers
+            ) as client:
+                response = await client.get(page_url)
+                return str(response.status_code), response.text
+
+        try:
+            return await sniff_page_manifest(url, fetch=_fetch)
+        except Exception as exc:  # noqa: BLE001 - sniffing is best-effort
+            log.info("page_sniff_fetch_failed url=%s error=%s", url, str(exc)[:200])
+            return None
+
+    async def _run_browser_stream(
+        self,
+        download_id: int,
+        url: str,
+        save_dir: Path,
+        quality: str,
+        headers: dict[str, str] | None,
+        cancel_event: threading.Event,
+        existing_path: Path | None,
+    ) -> Path | None:
+        """Run a browser-assisted HLS download.
+
+        Returns the finished file, or ``None`` (to fall back to yt-dlp) when
+        the browser/extension is unavailable, the manifest could not be read,
+        or a segment/key fetch failed mid-download. All pre-download and
+        mid-download browser failures now fall back to yt-dlp so non-Cloudflare
+        manifest hosts keep working without the browser.
+        """
+        from ...media import browser_streaming as browser_stream
+
+        referer = headers.get("Referer") if headers else None
+        frame_url = None
+        cookies = None
+        try:
+            with self.session_factory() as session:
+                row = DownloadRepository(session).get(download_id)
+                if row is not None:
+                    context = RequestContext.from_download(row)
+                    frame_url = context.frame_url or context.referer
+                    referer = context.referer or referer
+                    cookies = self._stream_cookies(row)
+        except Exception:
+            log.debug("stream_context_lookup_failed", id=download_id, exc_info=True)
+        basename = existing_path.name if existing_path is not None else None
+        try:
+            return await asyncio.to_thread(
+                browser_stream.download_browser_hls,
+                url,
+                save_dir,
+                quality,
+                session_factory=self.session_factory,
+                referer=referer,
+                frame_url=frame_url,
+                headers=headers,
+                cookies=cookies,
+                basename=basename,
+                progress_cb=self._make_stream_progress(download_id),
+                cancel_event=cancel_event,
+                fetch_timeout=90.0,
+            )
+        except browser_stream.BrowserUnavailableError as exc:
+            log.info(
+                "browser_stream_unavailable_falling_back",
+                id=download_id,
+                error=str(exc),
+            )
+            return None
+        except browser_stream.BrowserManifestError as exc:
+            # The fetch.* CDN master manifest 403s (Cloudflare bot-wall that
+            # only the player iframe can clear). The SAME page-scan batch also
+            # captured the player-host (megaplay.*) sibling URL -- the host
+            # that already produced completed downloads (DB IDs 159/164).
+            # Promote that sibling instead of failing; the non-Cloudflare host
+            # is the working one.
+            sibling_url = self._prefer_player_host_sibling(download_id, url, headers)
+            if sibling_url is not None:
+                log.info(
+                    "browser_stream_preferring_player_host_sibling_falling_back",
+                    id=download_id,
+                    url=sibling_url,
+                    error=str(exc)[:200],
+                )
+                return await self._run_browser_stream(
+                    download_id,
+                    sibling_url,
+                    save_dir,
+                    quality,
+                    headers,
+                    cancel_event,
+                    existing_path,
+                )
+            log.info(
+                "browser_stream_manifest_failed_falling_back",
+                id=download_id,
+                error=str(exc),
+            )
+            return None
+        except browser_stream.BrowserFetchError as exc:
+            # Mid-download segment/key fetch failure — fall back to yt-dlp
+            # rather than failing the download outright.
+            log.info(
+                "browser_stream_fetch_failed_falling_back",
+                id=download_id,
+                error=str(exc),
+            )
+            return None
+
     def _make_stream_progress(self, download_id: int):
-        def _hook(d: dict) -> None:
-            status = d.get("status")
-            if status == "downloading":
-                self.events.post(
-                    Events.PROGRESS_UPDATED,
-                    {
-                        "id": download_id,
-                        "downloaded": int(d.get("downloaded_bytes") or 0),
-                        "total": int(
-                            d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-                        ),
-                    },
+        """Create a progress callback compatible with yt-dlp and the HLS engine.
+
+        yt-dlp calls this hook with a single status dictionary, while the
+        browser HLS engine reports ``(downloaded_bytes, total_bytes)``.
+        Keeping one adapter here preserves the existing YouTube/yt-dlp
+        behaviour while allowing HLS downloads to report progress safely.
+        """
+
+        def _hook(d, total=None) -> None:
+            if isinstance(d, dict):
+                status = d.get("status")
+                if status != "downloading":
+                    return
+                downloaded = int(d.get("downloaded_bytes") or 0)
+                total_bytes = int(
+                    d.get("total_bytes") or d.get("total_bytes_estimate") or 0
                 )
                 speed = d.get("speed")
-                if speed is not None:
-                    self.events.post(
-                        Events.SPEED_UPDATED,
-                        {"id": download_id, "speed": float(speed)},
-                    )
                 eta = d.get("eta")
-                if eta is not None:
-                    self._etas[download_id] = float(eta)
+            else:
+                # HLS callback contract: (downloaded_bytes, total_bytes).
+                downloaded = int(d or 0)
+                total_bytes = int(total or 0)
+                speed = None
+                eta = None
+
+            self.events.post(
+                Events.PROGRESS_UPDATED,
+                {
+                    "id": download_id,
+                    "downloaded": downloaded,
+                    "total": total_bytes,
+                },
+            )
+            if speed is not None:
+                self.events.post(
+                    Events.SPEED_UPDATED,
+                    {"id": download_id, "speed": float(speed)},
+                )
+            if eta is not None:
+                self._etas[download_id] = float(eta)
 
         return _hook
 
@@ -909,6 +1543,7 @@ class DownloadManager:
             download.error = error
             session.commit()
             snapshot = self.snapshot_item(download)
+        self._sync_playlist_item(download, "failed", error)
         self.events.post(Events.DOWNLOAD_UPDATED, snapshot)
         self._post_notification("failed", snapshot)
         self.torrent_queue.admit_and_advance()
@@ -932,6 +1567,7 @@ class DownloadManager:
             session.commit()
             download = repo.get(download_id)
             snapshot = self.snapshot_item(download) if download else {"id": download_id}
+        self._sync_playlist_item(download, "completed")
         self.events.post(Events.DOWNLOAD_UPDATED, snapshot)
         self._post_notification("completed", snapshot)
         self.torrent_queue.admit_and_advance()
@@ -1017,15 +1653,24 @@ class DownloadManager:
         if sequential is None:
             sequential = bool(self.settings.get("torrent.default_sequential", False))
         seed = opts.get("seed_mode", bool(self.settings.get("torrent.auto_seed", False)))
+        connections = int(self.settings.get("torrent.connections_per_torrent", 0) or 0)
+
+        common: dict[str, Any] = {
+            "download_id": download.id,
+            "save_dir": save_dir,
+            "sequential": sequential,
+            "seed_mode": seed,
+            "connections_max": connections,
+            "resume_sidecar": (
+                str(sidecar_path_for(download.save_path)) if download.save_path else ""
+            ),
+        }
 
         if is_magnet_link(url):
             return TorrentSpec(
-                download_id=download.id,
-                save_dir=save_dir,
                 filename=download.filename or "torrent_download",
                 magnet_uri=url,
-                sequential=sequential,
-                seed_mode=seed,
+                **common,
             )
 
         local_path = Path(url) if url else Path()
@@ -1034,22 +1679,16 @@ class DownloadManager:
                 url, save_dir, target=self._torrent_meta_target(download)
             )
             return TorrentSpec(
-                download_id=download.id,
-                save_dir=save_dir,
                 filename=download.filename or Path(url).name,
                 torrent_file_path=torrent_path,
-                sequential=sequential,
-                seed_mode=seed,
+                **common,
             )
 
         if is_torrent_file_url(url) and local_path.is_file():
             return TorrentSpec(
-                download_id=download.id,
-                save_dir=save_dir,
                 filename=download.filename or local_path.name,
                 torrent_file_path=str(local_path),
-                sequential=sequential,
-                seed_mode=seed,
+                **common,
             )
 
         lower = url.strip().lower()
@@ -1058,21 +1697,15 @@ class DownloadManager:
                 url, save_dir, target=self._torrent_meta_target(download)
             )
             return TorrentSpec(
-                download_id=download.id,
-                save_dir=save_dir,
                 filename=download.filename or "torrent_download",
                 torrent_file_path=torrent_path,
-                sequential=sequential,
-                seed_mode=seed,
+                **common,
             )
 
         return TorrentSpec(
-            download_id=download.id,
-            save_dir=save_dir,
             filename=download.filename or "torrent_download",
             torrent_file_path=None,
-            sequential=sequential,
-            seed_mode=seed,
+            **common,
         )
 
     @staticmethod
@@ -1298,7 +1931,7 @@ class DownloadManager:
 
         metadata: dict[str, Any] = {}
         if detected in ("video", "audio"):
-            locator = FFmpegLocator()
+            locator = FFmpegLocator(settings=self.settings)
             if locator.available:
                 info = await probe(download.save_path, locator)
                 if info:
@@ -1313,8 +1946,17 @@ class DownloadManager:
             download.detected_type = detected
             if metadata:
                 download.media_metadata_json = metadata
+            # Actual resolution the platform served (the requested selector may
+            # have fallen back to a lower render via the ``[height<=N]`` rule):
+            height = metadata.get("height") if metadata else None
+            if isinstance(height, int) and height:
+                download.actual_height = height
+                download.actual_width = metadata.get("width")
+                download.actual_fps = metadata.get("fps")
             session.commit()
             snapshot = self.snapshot_item(download)
+            if download.playlist_id and download.playlist_item_index is not None:
+                self._sync_playlist_actual_quality(download, height)
         self.events.post(Events.MEDIA_DETECTED, {**snapshot, "media": metadata})
 
     # ----- engine event mirrors -----
@@ -1366,13 +2008,32 @@ class DownloadManager:
             download = repo.get(download_id)
             if download is None:
                 return
-            download.size_downloaded = int(payload.get("downloaded") or 0)
+            reported = int(payload.get("downloaded") or 0)
+            # Torrent progress is strictly monotonic for one download run: a dip
+            # back to ~0 happens while libtorrent re-checks files after a
+            # resume/re-add and would otherwise show the download as restarted.
+            # Keep the highest value seen so the DB/UI never regress the bar;
+            # explicit restarts zero the counter in restart() before starting.
+            if download.size_downloaded and reported < download.size_downloaded:
+                if download.detected_type == "torrent" or is_torrent_url(
+                    download.url or ""
+                ):
+                    reported = download.size_downloaded
+            download.size_downloaded = reported
             if payload.get("total"):
                 download.size_total = int(payload["total"])
             if payload.get("speed") is not None:
                 speed = float(payload["speed"])
                 download.speed_avg = speed
                 download.speed_peak = max(download.speed_peak or 0.0, speed)
+            for key, attr in (
+                ("num_peers", "torrent_num_peers"),
+                ("num_seeds", "torrent_num_seeds"),
+                ("num_pieces", "torrent_num_pieces"),
+                ("piece_size", "torrent_piece_size"),
+            ):
+                if key in payload and payload[key] is not None:
+                    setattr(download, attr, int(payload[key]))
             session.commit()
 
     def _on_speed(self, payload: dict) -> None:
@@ -1396,7 +2057,9 @@ class DownloadManager:
             if download is None:
                 return
             download.connections_active = int(payload.get("active") or 0)
-            download.connections_max = int(payload.get("max") or download.connections_max)
+            limit = int(payload.get("max") or 0)
+            if limit > 0:
+                download.connections_max = limit
             session.commit()
 
     def _on_torrent_name_resolved(self, payload: Any) -> None:
@@ -1459,9 +2122,28 @@ class DownloadManager:
         if self.semaphore._value != simultaneous:
             self.semaphore = asyncio.Semaphore(simultaneous)
         self._apply_bandwidth()
+        self._apply_torrent_limits()
         self.torrent_queue.admit_and_advance()
 
     # ----- helpers -----
+
+    def _apply_torrent_limits(self) -> None:
+        """Push torrent connection/rate-limit settings to the live session."""
+        if self._torrent_client is None:
+            return
+        from ...torrent.client import ClientConfig as TConfig
+
+        down_kb = int(self.settings.get("torrent.max_download_speed", 0) or 0)
+        up_kb = int(self.settings.get("torrent.max_upload_speed", 0) or 0)
+        self._torrent_client.apply_session_limits(
+            max_connections=int(self.settings.get("torrent.max_connections", 500)),
+            max_uploads=int(self.settings.get("torrent.max_uploads", 4)),
+            download_bps=down_kb * 1024,
+            upload_bps=up_kb * 1024,
+        )
+        # Throughput tuning (cache, threads, request queue, TCP preference) can
+        # be changed without restarting the session.
+        self._torrent_client.apply_tuning(TConfig.from_settings(self.settings))
 
     def _apply_bandwidth(self, override: float | None = None) -> None:
         if override is not None:
@@ -1495,6 +2177,7 @@ class DownloadManager:
             hash_expected=download.hash_expected,
             user_agent=str(self.settings.get("network.user_agent", "MagnetoClip/0.1")),
             priority=download.priority or 0,
+            in_place=bool(self.settings.get("downloads.inplace_downloads", True)),
         )
 
     def _build_auth(self, auth_ref: str | None):
@@ -1676,6 +2359,13 @@ class DownloadManager:
             "torrent_piece_size": download.torrent_piece_size,
             "torrent_sequential": download.torrent_sequential,
             "torrent_seeding": download.torrent_seeding,
+            "youtube_quality": download.youtube_quality,
+            "youtube_format": download.youtube_format,
+            "youtube_format_label": download.youtube_format_label,
+            "youtube_requested_quality": download.youtube_requested_quality,
+            "actual_height": download.actual_height,
+            "actual_width": download.actual_width,
+            "actual_fps": download.actual_fps,
         }
 
     def list_snapshots(self, **filters: Any) -> list[dict[str, Any]]:

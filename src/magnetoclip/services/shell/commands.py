@@ -15,6 +15,8 @@ def parse_command_uri(uri: str) -> dict | None:
     - ``magneto://open``                -> show the main window
     - ``magneto://open-downloads``      -> show the Downloads page
     - ``magneto://open-detected``       -> show the Detected page
+    - ``magneto://open-detected?category=<key>``
+                                        -> show one detection category
     - ``magneto://reveal?download=<id>`` -> show Downloads and reveal the file
     """
     if not uri or not uri.lower().startswith(_MAGNETO_SCHEME + ":"):
@@ -27,7 +29,11 @@ def parse_command_uri(uri: str) -> dict | None:
         return None
     host = (parsed.netloc or "").lower()
     if host == "open-detected":
-        return {"action": "open-detected"}
+        query = parse_qs(parsed.query)
+        raw = query.get("category", [""])[0]
+        from magnetoclip.ui.categories import normalize_detection_category
+
+        return {"action": "open-detected", "category": normalize_detection_category(raw)}
     if host == "open-downloads":
         return {"action": "open-downloads"}
     if host == "open":
@@ -75,6 +81,14 @@ def apply_command(window, uri: str) -> bool:
     if action == "open-detected":
         open_detected = getattr(window, "_open_detected", None)
         if open_detected is not None:
+            category = command.get("category") or None
+            if category:
+                # The hook takes the filter; older callers register a no-arg hook.
+                try:
+                    open_detected(category)
+                    return True
+                except TypeError:
+                    pass
             open_detected()
         else:
             _show_window(window)
@@ -98,9 +112,14 @@ def apply_command(window, uri: str) -> bool:
     return True
 
 
-def build_launch_uri(kind: str, download_id=None, action: str | None = None):
+def build_launch_uri(kind: str, download_id=None, action: str | None = None, category=None):
     """Map a notification payload to the ``magneto://`` URI its toast should open."""
     if action == "detected":
+        from magnetoclip.ui.categories import normalize_detection_category
+
+        normalized = normalize_detection_category(category)
+        if normalized:
+            return f"magneto://open-detected?category={normalized}"
         return "magneto://open-detected"
     if kind == "completed" and download_id:
         return f"magneto://reveal?download={int(download_id)}"

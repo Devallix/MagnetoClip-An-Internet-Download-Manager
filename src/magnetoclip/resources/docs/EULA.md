@@ -20,9 +20,12 @@ use the Software.
 documentation, and any updates, upgrades, patches, or modified versions that
 Devallix may provide to you.
 
-**1.2.** The Software is an advanced download manager that captures web
-content — including files, videos, music, and documents — and organizes
-downloaded items into automatically sorted categories.
+**1.2.** The Software is a general-purpose tool that downloads web content —
+including files, videos, music, and documents — and organizes downloaded items
+into automatically sorted categories. The Software is not affiliated with,
+endorsed by, or designed for use with any particular website, web service, or
+content provider. It works with websites and content you choose to access, and
+it does not host, publish, or distribute any content itself.
 
 ## 2. Grant of License
 
@@ -101,7 +104,9 @@ Software and for any consequences arising from such activity.
 trademarks, privacy rights, or other intellectual property or proprietary
 rights of any person or entity. Downloading or distributing copyrighted
 content without authorization may violate applicable law and expose you to
-civil and criminal liability.
+civil and criminal liability. The Software does not provide, recommend, or
+direct you to any particular source of content; you alone decide what content
+to download and are solely responsible for doing so lawfully.
 
 ## 6. Intellectual Property
 

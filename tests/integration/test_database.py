@@ -53,6 +53,47 @@ def test_migration_upgrade_adds_browser_tables(tmp_path):
     db.close()
 
 
+def test_migration_018_youtube_quality_columns_and_add(tmp_path):
+    """Migration 018 adds quality columns; repo.add persists them."""
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    inspector = inspect(db.engine)
+    download_columns = {c["name"] for c in inspector.get_columns("downloads")}
+    for column in (
+        "youtube_quality",
+        "youtube_height",
+        "youtube_width",
+        "youtube_fps",
+        "youtube_format",
+        "youtube_format_selector",
+        "youtube_merge_output_format",
+        "youtube_format_label",
+        "youtube_requested_quality",
+        "actual_width",
+        "actual_height",
+        "actual_fps",
+    ):
+        assert column in download_columns, f"missing downloads.{column}"
+    item_columns = {c["name"] for c in inspector.get_columns("playlist_items")}
+    assert "requested_quality" in item_columns
+    assert "actual_quality" in item_columns
+
+    repo = DownloadRepository(db.Session())
+    download = repo.add(
+        "https://www.youtube.com/watch?v=abc",
+        filename="v.mp4",
+        youtube_quality="720",
+        youtube_height=720,
+        youtube_format="b",
+        youtube_format_selector="b[height<=720]/b",
+        youtube_format_label="MP4 · 720p",
+        youtube_requested_quality="720p",
+    )
+    assert download.youtube_format_selector == "b[height<=720]/b"
+    assert download.youtube_requested_quality == "720p"
+    db.close()
+
+
 def test_download_crud(tmp_path):
     db = Database(tmp_path / "test.db")
     db.initialize()

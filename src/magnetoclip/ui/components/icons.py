@@ -27,6 +27,7 @@ _NAV_FILES = {
     "pause": "pause",
     "speedtest": "monitor",
     "browser": "internet",
+    "sites": "list",
     "settings": "settings",
     "about": "info",
     "all": "layers",

@@ -129,3 +129,18 @@ def reconcile_part_sizes(state: MClipState) -> None:
                 segment.written = size
             if segment.complete:
                 segment.status = "completed"
+
+
+def reconcile_inplace(state: MClipState) -> None:
+    """Clamp in-place segment progress to the planned range.
+
+    In-place downloads keep their progress only in the sidecar (there are no
+    part files to measure), so this guards against a persisted ``written`` that
+    overshoots a range which shrank between runs.
+    """
+    for segment in state.segments:
+        length = segment.length
+        if length is not None and segment.written > length:
+            segment.written = length
+        if segment.complete:
+            segment.status = "completed"

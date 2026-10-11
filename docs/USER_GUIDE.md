@@ -37,7 +37,8 @@ detects downloadable content as you browse.
 
 - Windows 10 or 11
 - An internet connection
-- A valid serial key (release builds only — development builds skip licensing)
+- A valid serial key (release builds only — development builds skip licensing);
+  new machines also get a free 7-day trial
 
 ### Starting the app
 
@@ -154,6 +155,37 @@ animated gauge, keeps a history and flags possible ISP throttling (see
 Setup hub for the MagnetoClip Companion extension (see
 [section 5](#5-browser-integration)).
 
+### Sites
+
+A built-in, offline reference of third-party websites useful for finding
+content, grouped into three tabs — **Torrents**, **Anime** and **Streaming** —
+sitting just before **Settings** in the toolbar.
+
+Each tab is a table with four columns:
+
+| Column | What it holds |
+|---|---|
+| Site | The site's name, bold, with the full description on hover |
+| Description | What the site is good for |
+| URL | The address, shown in blue and clickable |
+| Usage | Always **Free**, in green |
+
+Click any **URL** cell to open that site in your default browser — the cursor
+turns into a pointing hand over URL cells, so it is clear which ones are live
+links. Everything else is read-only.
+
+The reference ships with the app, so the page works with no internet
+connection, and nothing on it is fetched or refreshed at runtime.
+
+> **Note.** MagnetoClip is a general-purpose download tool. It is not
+> affiliated with, does not endorse, and is not responsible for any of the
+> listed sites or for the content available through them. Always confirm that
+> you are entitled to download the content you save, and review each site's own
+> terms and the law in your jurisdiction.
+
+To get here from a torrent, click **Browse more** at the bottom of the
+**Torrents** page.
+
 ### Settings
 
 Every tunable option, grouped into General, Downloads, Duplicate Detection,
@@ -235,12 +267,17 @@ button (when shown) pushes the published extension via browser policy.
 
 When a file is detected you get a **Downloadable file detected** popup with
 filename, save location, category and connection count, plus four choices:
-**Skip**, **Skip all** (suppresses popups — permanently if opened from
-Settings, otherwise for one hour), **Download later** (queue without starting)
-and **Download now**.
 
-Detected files also collect on the **Detected** page even if you skip the
-popup.
+| Choice | What it does |
+|---|---|
+| **Skip** | Reject just this file |
+| **Skip all** | Move all currently detected files to the **Detected** page; future files still ask for confirmation |
+| **Download later** | Queue the file without starting it |
+| **Download now** | Start the download immediately |
+
+To turn the confirmation popups off entirely, use **Settings → Browser &
+Capture → Skip all detected files without asking**. That is the only control
+that silences them, and it is just as easy to turn back on.
 
 ---
 
@@ -252,17 +289,35 @@ auto-sorts them into matching categories and folders when **Auto-categorize by
 file type** is enabled.
 
 Streaming platforms are handled through a dedicated engine supporting dozens
-of popular video/music sites plus direct HLS (`.m3u8`) and DASH (`.mpd`)
-streams. Pick a global quality under **Settings → Streaming media quality**:
-**Best**, **1080p**, **720p** or **Audio only**. Streamed video and audio
-tracks are merged automatically (via bundled FFmpeg tooling) into a single
-playable file, and titles/metadata are inferred where possible.
+of popular video/music sites plus direct HLS (`.m3u8`) and DASH (`.mpd`) streams.
+The app can also sniff audio/video manifests directly from the pages you visit,
+and fall back to browser-assisted capture for challenge-protected streams.
+
+Pick a default quality under **Settings → Browser & Capture → Streaming
+quality**: **Best**, **1080p**, **720p**, **Audio only**, or **Ask each
+time**. When *Ask each time* is selected (or a video offers a finer choice),
+MagnetoClip shows a resolution-ladder picker so you can choose the exact format
+before downloading.
+
+**Playlists** are supported too: paste a playlist URL into the **Add**
+dialog and MagnetoClip lists every video with name and duration. Tick the ones
+you want (or *Select all*), cap the number of items if you like, and download
+them in one shot — already-downloaded videos are tracked in an archive so you
+are not asked about them again. Streamed video and
+audio tracks are merged automatically (via bundled FFmpeg tooling) into a
+single playable file, and titles/metadata are inferred where possible.
 
 ---
 
 ## 7. Torrents
 
 Open the **Torrents** page to manage magnet links and `.torrent` files.
+
+### Finding torrent sites
+
+Open the **Sites** page for an offline reference of third-party sites that host
+torrents, anime and streaming content — each entry has a description and a
+clickable URL. See [Sites](#sites) in the interface tour.
 
 ### Adding a torrent
 
@@ -287,8 +342,15 @@ You can also associate MagnetClip with the OS once (Settings → Torrent):
 | Enable PEX | On | Peer exchange from connected peers |
 | Enable encryption | On | Obfuscate peer traffic |
 | Listen port | 6881 | Incoming peer connections |
-| Max connections | 200 | Per-torrent peer ceiling |
+| Max connections | 500 | Per-torrent peer ceiling |
 | Max upload slots | 4 | Simultaneous uploads per torrent |
+| Prefer TCP over uTP | On | Favour plain TCP for transfers |
+| Disk cache | 256 MB | Memory used for disk read/write caching |
+| Hashing threads | 4 | Threads that hash incoming pieces |
+| Request queue | 1500 | Outstanding requests per peer |
+| Connections per torrent | 0 | Cap per-torrent connections (0 = no cap) |
+| Max download speed | Unlimited | Global torrent download limit |
+| Max upload speed | Unlimited | Global upload limit |
 | Max active torrents | 5 | Queue size for unfinished torrents |
 | Max active downloads | 3 | How many actually transfer at once |
 | Sequential download | Off | Fetch pieces in order (enables near-instant preview playback) |
@@ -337,11 +399,13 @@ dialog. Use **Direct (no proxy)** to bypass.
 | Setting | Default | Range |
 |---|---|---|
 | Simultaneous downloads | 3 | 1–32 |
-| Connections per download | 8 | 1–64 |
+| Connections per download | 16 | 1–64 |
+| Write in place (skip post-download merge) | on | — |
 | Max bandwidth (0 = unlimited) | unlimited | MB/s cap |
 | Network timeout | 30 s | 5–300 s |
 | Max retries | 5 | 0–20 |
-| Custom User-Agent | *(empty)* | free text |
+| Verify TLS certificates for downloads | on | — |
+| Custom User-Agent | a modern desktop browser UA | free text |
 | Default download folder | *(choose)* | folder |
 | Auto-categorize by file type | on | — |
 | Theme | dark | dark / light |
@@ -350,7 +414,23 @@ dialog. Use **Direct (no proxy)** to bypass.
 ### Browser
 
 See the capture-modes table in [section 5](#5-browser-integration), plus
-**Streaming media quality** (Best / 1080p / 720p / Audio only).
+**Streaming quality** (Best / 1080p / 720p / Audio only / *Ask each time*) and
+**Video quality** (the default resolution/format behavior, including *Ask each
+time* for the per-video resolution picker). **FFmpeg folder** lets you point the
+app at your own FFmpeg installation instead of the bundled one.
+
+### Duplicate Detection
+
+| Setting | Default | Meaning |
+|---|---|---|
+| Detect files you have already downloaded | on | Compare new downloads against a local hash index |
+| Skip duplicates automatically | off | When on, duplicates are skipped instead of asking |
+| Index files after a download completes | on | Add finished files to the duplicate index |
+
+Filenames are matched first (fast); a hash comparison (xxHash-based) confirms a
+true duplicate. When a duplicate is found you can **Open the existing file**,
+**Download anyway**, or **Skip**. Use **Scan Downloads Folder** to build the
+index from files you already have.
 
 ### Network Speed Test
 
@@ -537,7 +617,7 @@ clicking a detected-file notification jumps to the Detected page.
 | Downloads database (SQLite) | Per-user application-data directory |
 | Serial key | Windows Credential Manager (OS keyring) |
 | Proxy passwords | OS keyring |
-| Logs | Structured JSON logs in the log directory (open the diagnostics report from support conversations — credentials are scrubbed automatically) |
+| Logs | Structured JSON logs in the log directory (credentials are scrubbed automatically) |
 
 Analytics shown on the Analytics page are computed **locally** from your own
 download history; nothing is uploaded.
@@ -581,5 +661,7 @@ binding reset from support.
 
 ---
 
-*MagnetoClip is developed by Devallix. See `docs/EULA.md` for the license
-terms.*
+*MagnetoClip is developed by Devallix. It is a general-purpose download tool —
+you are responsible for the content you download and for complying with
+applicable law. See `docs/EULA.md` for the license terms and the Terms of
+Service for acceptable use.*

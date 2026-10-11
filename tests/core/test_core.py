@@ -181,6 +181,22 @@ def test_add_data_bytes_completes_immediately(tmp_path):
     assert manager.start(download.id) is False
 
 
+def test_add_data_path_copies_browser_file_and_completes(tmp_path):
+    context = make_context(tmp_path)
+    manager: DownloadManager = context.manager
+    source = tmp_path / "browser" / "clip.mp4"
+    source.parent.mkdir(parents=True)
+    payload = b"\x00\x00\x00\x18ftypmp42" + bytes(4096)
+    source.write_bytes(payload)
+    proxy_url = "https://web.telegram.org/a/progressive/document123"
+    download = manager.add(proxy_url, filename="clip.mp4", data_path=source)
+    assert download.status == DownloadStatus.completed
+    assert Path(download.save_path).read_bytes() == payload
+    assert Path(download.save_path) != source
+    assert source.read_bytes() == payload
+    assert manager.start(download.id) is False
+
+
 async def test_download_completes(tmp_path):
     context = make_context(tmp_path)
     manager: DownloadManager = context.manager
@@ -259,6 +275,7 @@ async def test_pause_resume(tmp_path):
 
 async def test_cancel_mid_download(tmp_path):
     context = make_context(tmp_path)
+    context.settings.set("downloads.inplace_downloads", False)
     manager: DownloadManager = context.manager
     payload = bytes(range(256)) * 512
     with PayloadServer(payload, chunk_size=4096, chunk_delay=0.02) as server:
@@ -272,6 +289,28 @@ async def test_cancel_mid_download(tmp_path):
             lambda: _status(manager, download.id) == DownloadStatus.stopped
         )
     assert not _path(manager, download.id).exists()
+
+
+async def test_cancel_mid_download_inplace_keeps_resume_artifact(tmp_path):
+    context = make_context(tmp_path)
+    context.settings.set("downloads.inplace_downloads", True)
+    manager: DownloadManager = context.manager
+    payload = bytes(range(256)) * 512
+    with PayloadServer(payload, chunk_size=4096, chunk_delay=0.02) as server:
+        download = manager.add(server.url)
+        assert manager.start(download.id)
+        assert await wait_for(
+            lambda: _status(manager, download.id) == DownloadStatus.downloading
+        )
+        manager.cancel(download.id)
+        assert await wait_for(
+            lambda: _status(manager, download.id) == DownloadStatus.stopped
+        )
+    # In-place mode writes straight into the destination, so the partial file
+    # (and its sidecar) is the resume artifact rather than loose part files.
+    final = _path(manager, download.id)
+    assert final.exists()
+    assert not list(final.parent.glob(f"{final.name}.part*"))
 
 
 async def test_restart(tmp_path):
@@ -532,6 +571,35 @@ async def test_download_posts_start_and_complete_notifications(tmp_path):
     assert kinds.count("started") == 1
     assert kinds.count("completed") == 1
     assert kinds.index("started") < kinds.index("completed")
+
+
+async def test_torrent_recheck_dip_does_not_regress_size(tmp_path):
+    import time
+
+    context = make_context(tmp_path)
+    manager: DownloadManager = context.manager
+
+    torrent = manager.add(
+        url="https://example.com/torrents/archive.torrent", filename="archive.zip"
+    )
+    payload = {"id": torrent.id, "total": 20_000_000, "speed": 0.0}
+    manager._last_progress_write[torrent.id] = time.monotonic() - 10.0
+    manager._on_progress(dict(payload, downloaded=10_000_000))
+    assert _get(manager, torrent.id).size_downloaded == 10_000_000
+
+    # a re-check after resume dips back to ~0; the DB must keep the high mark
+    manager._last_progress_write[torrent.id] = time.monotonic() - 10.0
+    manager._on_progress(dict(payload, downloaded=0))
+    assert _get(manager, torrent.id).size_downloaded == 10_000_000
+
+    # non-torrent downloads keep reporting their real value (e.g. HTTP retries)
+    http = manager.add(url="https://example.com/video.mp4", filename="video.mp4")
+    http_payload = {"id": http.id, "total": 20_000_000, "speed": 0.0}
+    manager._last_progress_write[http.id] = time.monotonic() - 10.0
+    manager._on_progress(dict(http_payload, downloaded=7_000_000))
+    manager._last_progress_write[http.id] = time.monotonic() - 10.0
+    manager._on_progress(dict(http_payload, downloaded=3_000_000))
+    assert _get(manager, http.id).size_downloaded == 3_000_000
 
 
 # ----- helpers -----

@@ -180,6 +180,90 @@ async def test_resume_trims_plan_when_file_shrank(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_inplace_download_matches_payload(tmp_path):
+    with PayloadServer(PAYLOAD) as server:
+        core = MagnetoCore()
+        try:
+            spec = _make_spec(server, tmp_path, in_place=True)
+            task = core.submit(spec)
+            result = await task.run()
+            assert result == "completed"
+            assert spec.final_path.read_bytes() == PAYLOAD
+            assert list(tmp_path.glob("*.part*")) == []
+            assert not spec.final_path.with_name(spec.filename + ".mclip").exists()
+            assert server.range_requests > 0
+        finally:
+            await core.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_inplace_download_with_hash_verification(tmp_path):
+    expected = hashlib.sha256(PAYLOAD).hexdigest()
+    with PayloadServer(PAYLOAD) as server:
+        core = MagnetoCore()
+        try:
+            spec = _make_spec(
+                server,
+                tmp_path,
+                in_place=True,
+                hash_algo="sha256",
+                hash_expected=expected,
+            )
+            task = core.submit(spec)
+            result = await task.run()
+            assert result == "completed"
+            assert spec.final_path.read_bytes() == PAYLOAD
+        finally:
+            await core.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_inplace_resume_from_partial_state(tmp_path):
+    half = len(PAYLOAD) // 2
+    with PayloadServer(PAYLOAD) as server:
+        core = MagnetoCore()
+        try:
+            spec = _make_spec(server, tmp_path, connections_max=2, in_place=True)
+            state = MClipState(
+                url=spec.url,
+                file_path=str(spec.final_path),
+                total_size=len(PAYLOAD),
+                headers={},
+            )
+            state.segments = [
+                SegmentState(index=0, start=0, end=half - 1, written=300 * 1024),
+                SegmentState(index=1, start=half, end=len(PAYLOAD) - 1, written=0),
+            ]
+            # Preallocated final file with the first 300 KiB already written.
+            spec.final_path.write_bytes(
+                PAYLOAD[: 300 * 1024] + b"\x00" * (len(PAYLOAD) - 300 * 1024)
+            )
+
+            task = core.submit(spec, state)
+            result = await task.run()
+            assert result == "completed"
+            assert spec.final_path.read_bytes() == PAYLOAD
+            assert list(tmp_path.glob("*.part*")) == []
+        finally:
+            await core.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_inplace_falls_back_when_ranges_unsupported(tmp_path):
+    with no_range_server(PAYLOAD) as server:
+        core = MagnetoCore()
+        try:
+            spec = _make_spec(server, tmp_path, connections_max=4, in_place=True)
+            task = core.submit(spec)
+            result = await task.run()
+            assert result == "completed"
+            assert spec.final_path.read_bytes() == PAYLOAD
+            assert list(tmp_path.glob("*.part*")) == []
+        finally:
+            await core.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_pause_resume(tmp_path):
     slow = bytes(range(256)) * 512  # 128 KiB, slow stream
     with PayloadServer(slow, chunk_size=4096, chunk_delay=0.02) as server:

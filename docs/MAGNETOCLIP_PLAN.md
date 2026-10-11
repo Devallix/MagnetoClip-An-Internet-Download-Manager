@@ -15,9 +15,13 @@
 
 ## 1. Product Vision
 
-MagnetoClip is a high-performance desktop download manager designed to compete with established products such as IDM while delivering a significantly more modern, intelligent, and extensible experience.
+MagnetoClip is a high-performance desktop download manager designed to be a
+modern, intelligent, and extensible alternative to conventional download
+managers.
 
-The goal is **not** to make a "Python version of IDM." The goal is to take everything that works about IDM, remove its dated UX limitations, and build a modern download platform around it.
+The goal is **not** to replicate any existing download manager. The goal is to
+take everything that works well about download managers, remove dated UX
+limitations, and build a modern download platform around it.
 
 Core philosophy:
 
@@ -53,14 +57,14 @@ Combined capabilities:
                  │          ★
                  │
                  │
-     FDM ────────┼──────────── IDM
+     OTHERS ─────┼──────────── DOWNLOAD MANAGERS
                  │
                  │
                  ▼
             BASIC USERS
 ```
 
-IDM-level functionality + modern software architecture + premium UI + intelligent automation.
+Download-manager-class functionality + modern software architecture + premium UI + intelligent automation.
 
 **Competitive pillars:**
 

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -24,6 +25,12 @@ from ..util import format_bytes, format_speed
 from .base import Page, make_scrollable
 
 TERMINAL = {"completed", "failed", "verification_failed", "stopped"}
+
+# Progress events can fire several times per second per download, but the
+# manager persists them to the DB at most once a second. Reading the DB again
+# inside that window returns the same snapshot, so recent-card refreshes are
+# throttled to roughly the DB cadence.
+_UI_PROGRESS_THROTTLE = 0.75
 
 _ACCENT = {
     "active": "#3B82F6",
@@ -133,6 +140,10 @@ class OverviewPage(Page):
         self.recent_container = QWidget()
         self.recent_container.setObjectName("recent_container")
         self.recent_cards: dict[int, DownloadCard] = {}
+        self._last_progress: dict[int, float] = {}
+        # Whether events changed the stat cards since the last full refresh.
+        # The recent-activity list updates live either way.
+        self._dirty = True
         self.recent_layout = QVBoxLayout(self.recent_container)
         self.recent_layout.setContentsMargins(0, 0, 0, 0)
         self.recent_layout.setSpacing(8)
@@ -185,6 +196,14 @@ class OverviewPage(Page):
         events.connect(Events.PROGRESS_UPDATED, self._on_progress)
         events.connect(Events.SPEED_UPDATED, self._on_speed)
 
+        # refresh() re-reads the whole snapshot table for the stat cards;
+        # coalesce bursts of DOWNLOAD_UPDATED events instead of re-scanning
+        # once per update. The recent-activity card still updates immediately.
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(400)
+        self._refresh_timer.timeout.connect(self.refresh)
+
         self.refresh()
 
     # ── navigation ───────────────────────────────────────────────────────────
@@ -201,15 +220,20 @@ class OverviewPage(Page):
     def _on_updated(self, payload: Any) -> None:
         if isinstance(payload, dict) and payload.get("id"):
             self._upsert_recent(payload)
-        self.refresh()
+        self._refresh_timer.start()
 
     def _on_progress(self, payload: Any) -> None:
         if not isinstance(payload, dict):
             return
+        download_id = payload["id"]
+        now = time.monotonic()
+        if now - self._last_progress.get(download_id, 0.0) < _UI_PROGRESS_THROTTLE:
+            return
+        self._last_progress[download_id] = now
         manager = getattr(self.context, "manager", None)
         if manager is None:
             return
-        download = manager.get_download(payload["id"])
+        download = manager.get_download(download_id)
         if download is not None:
             self._upsert_recent(manager.snapshot_item(download))
         self.speed_card.set_value(format_speed(payload.get("speed")))
@@ -217,7 +241,12 @@ class OverviewPage(Page):
     def _on_speed(self, payload: Any) -> None:
         self.speed_card.set_value(format_speed(payload.get("speed")))
 
+    def needs_refresh(self) -> bool:
+        """True when stat cards changed since the last full refresh."""
+        return self._dirty
+
     def _upsert_recent(self, snapshot: dict) -> None:
+        self._dirty = True
         card = self.recent_cards.get(snapshot["id"])
         if card is None:
             card = DownloadCard()
@@ -248,6 +277,7 @@ class OverviewPage(Page):
         self.completed_card.set_value(str(completed))
         self.bytes_card.set_value(format_bytes(total_bytes))
         self.empty_label.setVisible(len(self.recent_cards) == 0)
+        self._dirty = False
         self._refresh_indexed_card()
 
     def _refresh_indexed_card(self) -> None:

@@ -116,6 +116,374 @@ def test_archive_queues_webpage_download(tmp_path):
     asyncio.run(context.shutdown())
 
 
+# ----- detection queue sync -----
+
+
+def _detection(url, **overrides):
+    entry = {
+        "id": "abc123",
+        "url": url,
+        "filename": url.rsplit("/", 1)[-1],
+        "category": "videos",
+        "detected_type": "video",
+        "mime_type": "video/mp4",
+        "page_url": "https://example.com/watch",
+        "source": "network_capture",
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _stored_files(context, page_url="https://example.com/watch"):
+    with context.session_factory() as session:
+        from magnetoclip.database.repositories import BrowserDetectionRepository
+
+        detections = BrowserDetectionRepository(session).list_detections()
+    for detection in detections:
+        if detection.page_url == page_url:
+            return detection.files_json
+    return []
+
+
+def test_detection_sync_stores_queued_entries(tmp_path):
+    context = make_context(tmp_path)
+    bridge = BrowserManager(context)
+    posted: list[dict] = []
+    context.events.connect(Events.BROWSER_EVENT, posted.append)
+
+    response = bridge.handle_message(
+        {
+            "type": "detection_sync",
+            "detections": [
+                _detection("https://cdn.example.com/a.mp4"),
+                _detection(
+                    "https://cdn.example.com/b.zip",
+                    id="def456",
+                    category="compressed",
+                    detected_type="archive",
+                    mime_type="application/zip",
+                ),
+            ],
+        }
+    )
+    assert response["type"] == "detection_sync_ok"
+    assert response["received"] == 2
+    assert response["added"] == 2
+
+    files = _stored_files(context)
+    by_url = {f["url"]: f for f in files}
+    assert by_url["https://cdn.example.com/a.mp4"]["category"] == "videos"
+    assert by_url["https://cdn.example.com/b.zip"]["category"] == "compressed"
+    assert by_url["https://cdn.example.com/b.zip"]["detected_type"] == "archive"
+    # A queued detection is never a download.
+    assert context.manager.list_snapshots(limit=10) == []
+    assert [p["source"] for p in posted] == ["detection_sync"]
+    asyncio.run(context.shutdown())
+
+
+def test_detection_sync_deduplicates_repeat_sends(tmp_path):
+    context = make_context(tmp_path)
+    bridge = BrowserManager(context)
+    batch = {"type": "detection_sync", "detections": [_detection("https://cdn.example.com/a.mp4")]}
+
+    first = bridge.handle_message(batch)
+    assert first["added"] == 1
+    second = bridge.handle_message(batch)
+    assert second["added"] == 0
+    assert len(_stored_files(context)) == 1
+    asyncio.run(context.shutdown())
+
+
+def test_detection_sync_merges_into_the_page_row(tmp_path):
+    context = make_context(tmp_path)
+    bridge = BrowserManager(context)
+    bridge.handle_message(
+        {
+            "type": "detection_sync",
+            "detections": [_detection("https://cdn.example.com/a.mp4")],
+        }
+    )
+    response = bridge.handle_message(
+        {
+            "type": "detection_sync",
+            "detections": [
+                _detection("https://cdn.example.com/b.mp4", id="zzz", page_url="https://x.test/p")
+            ],
+        }
+    )
+    assert response["pages"] == 1
+    with context.session_factory() as session:
+        from magnetoclip.database.repositories import BrowserDetectionRepository
+
+        detections = BrowserDetectionRepository(session).list_detections()
+    assert len(detections) == 2
+    # Same page -> same row, both files.
+    assert len(_stored_files(context)) == 1
+    assert len(_stored_files(context, "https://x.test/p")) == 1
+    asyncio.run(context.shutdown())
+
+
+def test_detection_sync_keeps_stream_request_context(tmp_path):
+    """A manifest must survive the queue with the context the player used.
+
+    Segment/key requests are replayed from the download row; if the sync step
+    drops the headers, cookies or player frame, the CDN answers 403 and the
+    stream dies after the manifest was already saved.
+    """
+    context = make_context(tmp_path)
+    bridge = BrowserManager(context)
+    bridge.handle_message(
+        {
+            "type": "detection_sync",
+            "detections": [
+                _detection(
+                    "https://cdn.example.com/hls/master.m3u8",
+                    category="videos",
+                    detected_type="video",
+                    mime_type="application/vnd.apple.mpegurl",
+                    headers={"Origin": "https://player.example.com", "Sec-Fetch-Mode": "cors"},
+                    cookies="sid=1; cf_clearance=abc",
+                    user_agent="Mozilla/5.0 (X11; Linux x86_64)",
+                    referrer="https://player.example.com/embed/9",
+                    frame_url="https://player.example.com/embed/9",
+                )
+            ],
+        }
+    )
+    files = _stored_files(context)
+    assert len(files) == 1
+    entry = files[0]
+    assert entry["headers"] == {
+        "Origin": "https://player.example.com",
+        "Sec-Fetch-Mode": "cors",
+    }
+    assert entry["cookies"] == {"sid": "1", "cf_clearance": "abc"}
+    assert entry["user_agent"] == "Mozilla/5.0 (X11; Linux x86_64)"
+    assert entry["referrer"] == "https://player.example.com/embed/9"
+    assert entry["frame_url"] == "https://player.example.com/embed/9"
+    asyncio.run(context.shutdown())
+
+
+def test_detection_sync_derives_frame_url_from_referrer(tmp_path):
+    context = make_context(tmp_path)
+    bridge = BrowserManager(context)
+    bridge.handle_message(
+        {
+            "type": "detection_sync",
+            "detections": [
+                _detection(
+                    "https://cdn.example.com/hls/v.m3u8",
+                    referrer="https://player.example.com/embed/7",
+                    frame_url="",
+                    headers={},
+                )
+            ],
+        }
+    )
+    entry = _stored_files(context)[0]
+    assert entry["frame_url"] == "https://player.example.com/embed/7"
+    asyncio.run(context.shutdown())
+
+
+def test_detection_sync_enriches_existing_entries(tmp_path):
+    context = make_context(tmp_path)
+    bridge = BrowserManager(context)
+    bridge.handle_message(
+        {
+            "type": "detection_sync",
+            "detections": [_detection("https://cdn.example.com/a.mp4")],
+        }
+    )
+    bridge.handle_message(
+        {
+            "type": "detection_sync",
+            "detections": [
+                _detection("https://cdn.example.com/a.mp4", cookies="sid=1", filename="")
+            ],
+        }
+    )
+    files = _stored_files(context)
+    assert len(files) == 1
+    # Stored as a mapping, not the raw header string: the download manager
+    # merges cookies by name and raises if it is handed a string.
+    assert files[0]["cookies"] == {"sid": "1"}
+    asyncio.run(context.shutdown())
+
+
+def test_detection_sync_drops_unresolvable_blob_uris(tmp_path):
+    context = make_context(tmp_path)
+    bridge = BrowserManager(context)
+    response = bridge.handle_message(
+        {
+            "type": "detection_sync",
+            "detections": [
+                _detection("blob:https://example.com/1234", page_url="https://example.com/watch"),
+                _detection("https://cdn.example.com/ok.mp4"),
+            ],
+        }
+    )
+    assert response["stored"] == 1
+    assert [f["url"] for f in _stored_files(context)] == ["https://cdn.example.com/ok.mp4"]
+    asyncio.run(context.shutdown())
+
+
+def test_detection_sync_keeps_inline_blob_data(tmp_path):
+    context = make_context(tmp_path)
+    bridge = BrowserManager(context)
+    bridge.handle_message(
+        {
+            "type": "detection_sync",
+            "detections": [
+                _detection(
+                    "blob:https://example.com/1234",
+                    data_base64="aGk=",
+                    page_url="https://example.com/watch",
+                )
+            ],
+        }
+    )
+    files = _stored_files(context)
+    assert len(files) == 1
+    assert files[0]["data_base64"] == "aGk="
+    asyncio.run(context.shutdown())
+
+
+def test_detection_sync_rejects_unknown_category(tmp_path):
+    context = make_context(tmp_path)
+    bridge = BrowserManager(context)
+    bridge.handle_message(
+        {
+            "type": "detection_sync",
+            "detections": [_detection("https://cdn.example.com/a.bin", category="nope")],
+        }
+    )
+    assert _stored_files(context)[0]["category"] == ""
+    asyncio.run(context.shutdown())
+
+
+def test_detection_sync_requires_a_list(tmp_path):
+    context = make_context(tmp_path)
+    bridge = BrowserManager(context)
+    assert bridge.handle_message({"type": "detection_sync"})["type"] == "detection_sync_error"
+    assert (
+        bridge.handle_message({"type": "detection_sync", "detections": []})["type"]
+        == "detection_sync_ok"
+    )
+    asyncio.run(context.shutdown())
+
+
+def test_detection_sync_rejected_when_integration_disabled(tmp_path):
+    context = make_context(tmp_path)
+    context.settings.set("browser.integration_enabled", False)
+    bridge = BrowserManager(context)
+    response = bridge.handle_message(
+        {"type": "detection_sync", "detections": [_detection("https://cdn.example.com/a.mp4")]}
+    )
+    assert response["type"] == "detection_sync_error"
+    asyncio.run(context.shutdown())
+
+
+def test_open_detected_queues_navigation_for_the_app_process(tmp_path):
+    context = make_context(tmp_path)
+    bridge = BrowserManager(context)
+    response = bridge.handle_message({"type": "open_detected", "category": "compressed"})
+    assert response == {"type": "open_detected_ok", "category": "compressed"}
+    # The host process shares the database, not the UI's event bus.
+    with context.session_factory() as session:
+        from magnetoclip.database.models import BrowserRequest
+
+        rows = session.query(BrowserRequest).filter(BrowserRequest.type == "navigate").all()
+    assert len(rows) == 1
+    assert rows[0].payload_json == {"page": "detected", "category": "compressed"}
+    asyncio.run(context.shutdown())
+
+
+def test_open_detected_without_category_shows_everything(tmp_path):
+    context = make_context(tmp_path)
+    bridge = BrowserManager(context)
+    assert bridge.handle_message({"type": "open_detected"})["category"] == ""
+    with context.session_factory() as session:
+        from magnetoclip.database.models import BrowserRequest
+
+        row = session.query(BrowserRequest).filter(BrowserRequest.type == "navigate").one()
+    assert row.payload_json["category"] == ""
+    asyncio.run(context.shutdown())
+
+
+def test_navigation_requests_are_not_pushed_to_the_extension(tmp_path):
+    context = make_context(tmp_path)
+    bridge = BrowserManager(context)
+    bridge.handle_message({"type": "open_detected", "category": "audio"})
+    # The writer thread only speaks to the browser; a "navigate" row belongs to
+    # the UI poll and must never be claimed here.
+    assert bridge.next_outbound_message() is None
+    asyncio.run(context.shutdown())
+
+
+# ----- outbound detection messages -----
+
+
+def test_outbound_detections_handled(tmp_path):
+    context = make_context(tmp_path)
+    bridge = BrowserManager(context)
+    with context.session_factory() as session:
+        from magnetoclip.database.repositories import BrowserRequestRepository
+
+        BrowserRequestRepository(session).add(
+            "detections_handled", payload={"urls": ["https://cdn.example.com/a.mp4"], "ids": ["x"]}
+        )
+    assert bridge.next_outbound_message() == {
+        "type": "detections_handled",
+        "urls": ["https://cdn.example.com/a.mp4"],
+        "ids": ["x"],
+    }
+    # Claimed exactly once.
+    assert bridge.next_outbound_message() is None
+    asyncio.run(context.shutdown())
+
+
+def test_outbound_fetch_detections(tmp_path):
+    context = make_context(tmp_path)
+    bridge = BrowserManager(context)
+    with context.session_factory() as session:
+        from magnetoclip.database.repositories import BrowserRequestRepository
+
+        request = BrowserRequestRepository(session).add("fetch_detections")
+    assert bridge.next_outbound_message() == {
+        "type": "fetch_detections",
+        "request_id": request.id,
+    }
+    asyncio.run(context.shutdown())
+
+
+def test_outbound_handled_without_urls_is_marked_error(tmp_path):
+    context = make_context(tmp_path)
+    bridge = BrowserManager(context)
+    with context.session_factory() as session:
+        from magnetoclip.database.repositories import BrowserRequestRepository
+
+        repo = BrowserRequestRepository(session)
+        repo.add("detections_handled", payload={"urls": []})
+    assert bridge.next_outbound_message() is None
+    with context.session_factory() as session:
+        from magnetoclip.database.models import BrowserRequest
+
+        assert session.get(BrowserRequest, 1).status == "error"
+    asyncio.run(context.shutdown())
+
+
+def test_outbound_disabled_when_integration_off(tmp_path):
+    context = make_context(tmp_path)
+    context.settings.set("browser.integration_enabled", False)
+    bridge = BrowserManager(context)
+    with context.session_factory() as session:
+        from magnetoclip.database.repositories import BrowserRequestRepository
+
+        BrowserRequestRepository(session).add("fetch_detections")
+    assert bridge.next_outbound_message() is None
+    asyncio.run(context.shutdown())
+
+
 def test_settings_reports_flags(tmp_path):
     context = make_context(tmp_path)
     context.settings.set("browser.capture_enabled", False)
@@ -621,6 +989,113 @@ def test_capture_chunk_assembles_out_of_order(tmp_path):
     asyncio.run(context.shutdown())
 
 
+def test_capture_chunk_streaming_finalizes_on_last(tmp_path):
+    import base64
+
+    context = make_context(tmp_path)
+    context.settings.set("browser.confirm_capture", True)
+    bridge = BrowserManager(context)
+    payload = bytes(range(256)) * 4000  # ~1MB
+    encoded = base64.b64encode(payload).decode("ascii")
+    # Splitting on base64 multiples of 4 keeps individual chunks decodable.
+    chunk_size = (len(encoded) // 3 // 4) * 4
+    chunks = [encoded[i * chunk_size : (i + 1) * chunk_size] for i in range(3)]
+    chunks = [c for c in chunks if c]
+    assert "".join(chunks) == encoded
+
+    proxy = "https://web.telegram.org/a/progressive/document1?size=700000&quality=m"
+    responses = []
+    for index, chunk in enumerate(chunks):
+        response = bridge.handle_message(
+            {
+                "type": "capture_chunk",
+                "capture_key": "tg-live-1",
+                "index": index,
+                "total": 0,
+                "chunk": chunk,
+                "url": proxy,
+                "filename": "document1.mp4",
+                "mime_type": "video/mp4",
+                "detected_type": "video",
+                "referrer": "https://web.telegram.org/a/#123",
+                "last": False,
+            }
+        )
+        responses.append(response["type"])
+    final = bridge.handle_message(
+        {
+            "type": "capture_chunk",
+            "capture_key": "tg-live-1",
+            "index": len(chunks),
+            "total": 0,
+            "chunk": "",
+            "url": proxy,
+            "filename": "document1.mp4",
+            "mime_type": "video/mp4",
+            "detected_type": "video",
+            "referrer": "https://web.telegram.org/a/#123",
+            "last": True,
+        }
+    )
+    assert responses == ["capture_chunk_ok"] * len(chunks)
+    assert final["type"] == "capture_pending"
+    with context.session_factory() as session:
+        from magnetoclip.database.repositories import PendingCaptureRepository
+
+        pending = PendingCaptureRepository(session).pending()
+    assert len(pending) == 1
+    assert pending[0].data_base64 == encoded
+    assert pending[0].filename == "document1.mp4"
+    assert pending[0].referrer == "https://web.telegram.org/a/#123"
+    asyncio.run(context.shutdown())
+
+
+def test_capture_chunk_stream_rejects_out_of_order(tmp_path):
+    import base64
+
+    context = make_context(tmp_path)
+    bridge = BrowserManager(context)
+    response = bridge.handle_message(
+        {
+            "type": "capture_chunk",
+            "capture_key": "tg-live-2",
+            "index": 1,
+            "total": 0,
+            "chunk": base64.b64encode(b"first-bytes").decode("ascii"),
+            "url": "https://web.telegram.org/a/progressive/document2",
+            "filename": "document2.mp4",
+            "mime_type": "video/mp4",
+            "detected_type": "video",
+            "last": False,
+        }
+    )
+    assert response["type"] == "capture_chunk_error"
+    assert "out of order" in response["message"]
+    asyncio.run(context.shutdown())
+
+
+def test_capture_chunk_stream_empty_rejected(tmp_path):
+    context = make_context(tmp_path)
+    bridge = BrowserManager(context)
+    response = bridge.handle_message(
+        {
+            "type": "capture_chunk",
+            "capture_key": "tg-live-3",
+            "index": 0,
+            "total": 0,
+            "chunk": "",
+            "url": "https://web.telegram.org/a/progressive/document3",
+            "filename": "document3.mp4",
+            "mime_type": "video/mp4",
+            "detected_type": "video",
+            "last": True,
+        }
+    )
+    assert response["type"] == "capture_chunk_error"
+    assert "empty" in response["message"]
+    asyncio.run(context.shutdown())
+
+
 def test_capture_chunk_incomplete_expires(tmp_path):
     import base64
 
@@ -1064,7 +1539,10 @@ def test_native_hosts_registry_key_per_browser():
         install_mod._native_hosts_registry_key("vivaldi")
         == "Software\\Vivaldi\\NativeMessagingHosts"
     )
-    assert install_mod._native_hosts_registry_key("firefox") is None
+    assert (
+        install_mod._native_hosts_registry_key("firefox")
+        == "Software\\Mozilla\\NativeMessagingHosts"
+    )
 
 
 def test_register_and_unregister_native_host(monkeypatch, tmp_path):
@@ -1090,9 +1568,15 @@ def test_register_and_unregister_native_host(monkeypatch, tmp_path):
         HKEY_CURRENT_USER = "HKCU"
         REG_SZ = "REG_SZ"
         KEY_SET_VALUE = 0x0002
+        KEY_WOW64_64KEY = 0x0100
 
         @staticmethod
         def CreateKey(hive, key):
+            created.append((hive, key))
+            return FakeKey(key)
+
+        @staticmethod
+        def CreateKeyEx(hive, key, reserved, access):
             created.append((hive, key))
             return FakeKey(key)
 
@@ -1125,11 +1609,33 @@ def test_register_and_unregister_native_host(monkeypatch, tmp_path):
     ]
 
     install_mod._register_native_host("firefox", manifest)
-    assert len(created) == 1
+    assert created == [
+        ("HKCU", "Software\\Google\\Chrome\\NativeMessagingHosts\\com.magnetoclip.host"),
+        ("HKCU", "Software\\Mozilla\\NativeMessagingHosts\\com.magnetoclip.host"),
+    ]
+    assert values == [
+        (
+            "Software\\Google\\Chrome\\NativeMessagingHosts\\com.magnetoclip.host",
+            "",
+            "REG_SZ",
+            str(manifest),
+        ),
+        (
+            "Software\\Mozilla\\NativeMessagingHosts\\com.magnetoclip.host",
+            "",
+            "REG_SZ",
+            str(manifest),
+        ),
+    ]
 
     install_mod._unregister_native_host("chrome")
     assert deleted == [
         ("Software\\Google\\Chrome\\NativeMessagingHosts", "com.magnetoclip.host")
+    ]
+    install_mod._unregister_native_host("firefox")
+    assert deleted == [
+        ("Software\\Google\\Chrome\\NativeMessagingHosts", "com.magnetoclip.host"),
+        ("Software\\Mozilla\\NativeMessagingHosts", "com.magnetoclip.host"),
     ]
 
 
@@ -1176,6 +1682,32 @@ def test_next_outbound_message_claims_queued_request(tmp_path):
     asyncio.run(context.shutdown())
 
 
+def test_next_outbound_message_background_fetch_passes_through(tmp_path):
+    context = make_context(tmp_path)
+    bridge = BrowserManager(context)
+    from magnetoclip.database.repositories import BrowserRequestRepository
+
+    with context.session_factory() as session:
+        request = BrowserRequestRepository(session).add(
+            "fetch_blob",
+            payload={
+                "url": "https://cdn.imgnex.top/hls/master.m3u8",
+                "background": True,
+                "referrer": "https://anikai.watch/watch/episode-1",
+            },
+        )
+
+    outbound = bridge.next_outbound_message()
+    assert outbound == {
+        "type": "fetch_blob",
+        "request_id": request.id,
+        "url": "https://cdn.imgnex.top/hls/master.m3u8",
+        "background": True,
+        "referrer": "https://anikai.watch/watch/episode-1",
+    }
+    asyncio.run(context.shutdown())
+
+
 def test_next_outbound_message_empty_and_disabled(tmp_path):
     context = make_context(tmp_path)
     bridge = BrowserManager(context)
@@ -1192,12 +1724,31 @@ def test_next_outbound_message_unsupported_type_marked_error(tmp_path):
     bridge = BrowserManager(context)
     from magnetoclip.database.repositories import BrowserRequestRepository
 
+    # A claimed type that cannot be turned into a message must be recorded as an
+    # error rather than silently dropped.
     with context.session_factory() as session:
-        request = BrowserRequestRepository(session).add("custom", payload={})
+        request = BrowserRequestRepository(session).add("fetch_blob", payload={})
     assert bridge.next_outbound_message() is None
     with context.session_factory() as session:
         loaded = BrowserRequestRepository(session).get(request.id)
     assert loaded.status == "error"
+    asyncio.run(context.shutdown())
+
+
+def test_next_outbound_message_leaves_request_types_it_does_not_own(tmp_path):
+    """The writer and the UI poll the same table for different purposes."""
+    context = make_context(tmp_path)
+    bridge = BrowserManager(context)
+    from magnetoclip.database.repositories import BrowserRequestRepository
+
+    with context.session_factory() as session:
+        request = BrowserRequestRepository(session).add(
+            "navigate", payload={"page": "detected", "category": ""}
+        )
+    assert bridge.next_outbound_message() is None
+    with context.session_factory() as session:
+        loaded = BrowserRequestRepository(session).get(request.id)
+    assert loaded.status == "queued", "the UI must still be able to claim it"
     asyncio.run(context.shutdown())
 
 
@@ -1305,4 +1856,32 @@ def test_blob_fetch_result_error_marks_request(tmp_path):
         loaded = BrowserRequestRepository(session).get(request.id)
     assert loaded.status == "error"
     assert loaded.result_json["message"] == "tab closed"
+    asyncio.run(context.shutdown())
+
+
+def test_blob_fetch_result_resolved_url_marks_ready(tmp_path):
+    context = make_context(tmp_path)
+    bridge = BrowserManager(context)
+    request = make_blob_request(context)
+
+    response = bridge.handle_message(
+        {
+            "type": "blob_fetch_result",
+            "request_id": request.id,
+            "resolved_url": "https://cdn.telegram.org/file/abc/clip.mp4",
+            "cookies": "stel=1",
+            "referrer": "https://web.telegram.org/a/",
+            "mime_type": "video/mp4",
+        }
+    )
+    assert response["type"] == "blob_fetch_result_ok"
+    with context.session_factory() as session:
+        from magnetoclip.database.repositories import BrowserRequestRepository
+
+        loaded = BrowserRequestRepository(session).get(request.id)
+    assert loaded.status == "ready"
+    assert loaded.data_base64 is None
+    assert loaded.result_json["resolved_url"] == "https://cdn.telegram.org/file/abc/clip.mp4"
+    assert loaded.result_json["cookies"] == "stel=1"
+    assert loaded.result_json["referrer"] == "https://web.telegram.org/a/"
     asyncio.run(context.shutdown())

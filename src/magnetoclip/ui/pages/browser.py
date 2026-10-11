@@ -46,7 +46,7 @@ _MANUAL_STEPS = {
     "firefox": (
         "Open Firefox and go to about:debugging#/runtime/this-firefox.",
         "Click Load Temporary Add-on.",
-        "Select the manifest.json file inside the extension folder above.",
+        "Select the manifest.json file inside the Firefox extension folder above.",
         "The add-on appears; captures are automatic.",
         "Note: temporary add-ons reset when Firefox restarts, so re-load it after restarting.",
     ),
@@ -163,6 +163,11 @@ class BrowserPage(Page):
         self.extension_path_label.setObjectName("card_caption")
         self.extension_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         card_layout.addWidget(self.extension_path_label)
+
+        self.extension_path_firefox_label = QLabel("")
+        self.extension_path_firefox_label.setObjectName("card_caption")
+        self.extension_path_firefox_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        card_layout.addWidget(self.extension_path_firefox_label)
 
         self.extension_id_label = QLabel("")
         self.extension_id_label.setObjectName("card_caption")
@@ -325,12 +330,19 @@ class BrowserPage(Page):
         self.default_downloader_check.blockSignals(False)
 
         if status is not None:
-            self.extension_path_label.setText(f"Folder: {status['extension_dir']}")
+            self.extension_path_label.setText(f"Chrome folder: {status['extension_dir']}")
+            self.extension_path_firefox_label.setText(
+                f"Firefox folder: {status['extension_dir_firefox']}"
+            )
             self.extension_id_label.setText(f"Extension ID: {status['extension_id']}")
             enabled = status["enabled"]
             self.status_dot.setStyleSheet("color: #34D399;" if enabled else "color: #F87171;")
             launcher = "host launcher ready" if status["launcher_exists"] else "host launcher missing"
-            extension = "extension ready" if status["extension_ready"] else "extension not prepared"
+            extension = (
+                "extension ready"
+                if status["extension_ready"] and status["extension_firefox_ready"]
+                else "extension not prepared"
+            )
             state = "enabled" if enabled else "disabled"
             self.status_label.setText(f"Integration {state} · {launcher} · {extension}")
 

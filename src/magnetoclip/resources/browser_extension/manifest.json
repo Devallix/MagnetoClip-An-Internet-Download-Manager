@@ -1,9 +1,10 @@
 {
   "manifest_version": 3,
   "name": "MagnetoClip Companion",
-  "version": "1.8.0",
-  "description": "Captures downloads, adds a right-click download menu, and detects downloadable files for MagnetoClip.",
+  "version": "1.10.8",
+  "description": "Detects images, videos, audio, compressed files, documents and other media across the web, queues them in six categories, and hands them to MagnetoClip on demand.",
   "permissions": [
+    "alarms",
     "cookies",
     "downloads",
     "nativeMessaging",
@@ -11,6 +12,7 @@
     "contextMenus",
     "tabs",
     "scripting",
+    "webNavigation",
     "webRequest",
     "storage"
   ],
@@ -19,7 +21,12 @@
     "https://*/*"
   ],
   "background": {
-    "service_worker": "background.js"
+    "scripts": [
+      "compat.js",
+      "categories.js",
+      "queue.js",
+      "background.js"
+    ]
   },
   "content_scripts": [
     {
@@ -28,9 +35,14 @@
         "https://*/*"
       ],
       "js": [
-        "content.js"
+        "compat.js",
+        "categories.js",
+        "content.js",
+        "player_overlay.js"
       ],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": true,
+      "match_about_blank": false
     }
   ],
   "action": {

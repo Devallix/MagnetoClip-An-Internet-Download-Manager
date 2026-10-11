@@ -3,11 +3,11 @@
 **Advanced Download Manager — Capture the Web.**
 
 MagnetoClip is a Windows desktop download manager built with Python + PySide6.
-It pairs an IDM-class multi-connection download core with a browser extension
+It pairs an advanced multi-connection download core with a browser extension
 that detects files, media streams and torrents as you browse — then captures
 them into smart, auto-sorted categories.
 
-Current version: **0.2.7**
+Current version: **1.1.0**
 
 ## Documentation
 
@@ -25,6 +25,10 @@ Current version: **0.2.7**
   connection allocation (up to 64 connections per download, 32 simultaneous)
 - **Resume support** — interrupted downloads continue from exact byte offsets
   via `.mclip` JSON sidecar files, surviving restarts and crashes
+- **In-place downloads** — most files are written directly to their final
+  destination as they arrive, so there is no post-download merge step and no
+  double disk usage; byte-range merging is used only when a server does not
+  support partial requests
 - **Automatic retries** — exponential backoff on transient failures (0–20 retries)
 - **Integrity verification** — finished files pass hashing checks
   (MD5 / SHA1 / SHA256 / SHA512 / BLAKE2b) before being marked complete
@@ -59,10 +63,15 @@ Chromium**, connected over native messaging:
 
 ### Streaming media
 
-- Dedicated engine (yt-dlp based) supporting 30+ popular video/music sites,
-  plus direct HLS (`.m3u8`) and DASH (`.mpd`) streams
-- Quality picker: Best / 1080p / 720p / Audio only
+- Dedicated engine (yt-dlp based) supporting dozens of popular video/music
+  sites, plus direct HLS (`.m3u8`) and DASH (`.mpd`) streams
+- In-app manifest sniffing detects audio/video streams on the pages you visit
+- Per-video quality ladder picker (preset resolutions, `Best`, or *ask each
+  time*), covering single videos and playlists
+- Playlist downloads with per-video selection, an extractor limit and a
+  downloaded-history archive
 - Automatic track merging and metadata handling via FFmpeg tooling
+- Browser-assisted capture for challenge-protected streams and `blob:` media
 
 ### Torrents
 
@@ -70,6 +79,9 @@ Chromium**, connected over native messaging:
   files with metadata preview (name, size, tracker, info hash, file list)
 - DHT, PEX and protocol encryption (all toggleable), configurable listen port
   and peer/upload limits
+- Performance tuning for large swarms: disk cache size, hashing threads,
+  outbound request queue, per-torrent connection cap and a TCP-over-uTP
+  preference
 - Torrent queue with active-torrent and active-download slots
 - **Sequential downloading** for near-instant preview playback
 - Seeding controls: auto-seed after completion or manual "Start Seeding"
@@ -112,6 +124,10 @@ Chromium**, connected over native messaging:
 ### Desktop experience
 
 - Dark and light themes, splash screen, animated sidebar and page transitions
+- **Sites page** — a built-in, offline reference of third-party websites useful
+  for finding content, grouped by category with a description and a clickable
+  URL for each entry; MagnetoClip is not affiliated with, and does not endorse,
+  any listed site
 - System tray with pause-all/resume-all, remote pairing, license info and
   balloon notifications that deep-link to files or detected items
 - Context menus everywhere: open/reveal/restart/retry/copy URL/remove
@@ -184,10 +200,11 @@ src/magnetoclip/
 ├── torrent/      # libtorrent wrapper, magnets, associations, search
 ├── security/     # credentials, validation, path safety, audit
 ├── services/     # logging, notifications, analytics, diagnostics,
-│                 #   licensing, remote dashboard, updates
+│                 #   licensing, remote dashboard, updates, sites catalog
 └── ui/           # PySide6 pages, dialogs, widgets, themes
 license-server/   # Flask + SQLite licensing backend + web admin panel
 docs/             # plans, user guide, EULA
+sites_info/       # reference notes used by the in-app Sites reference
 tests/            # unit / service / UI / browser / media test suites
 ```
 

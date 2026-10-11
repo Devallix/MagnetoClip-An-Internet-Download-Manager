@@ -88,7 +88,7 @@ class AddUrlDialog(QDialog):
         self.connections_spin = QSpinBox()
         self.connections_spin.setRange(1, 64)
         self.connections_spin.setValue(
-            int(context.settings.get("downloads.connections_per_download", 8))
+            int(context.settings.get("downloads.connections_per_download", 16))
         )
         connections_row.addWidget(self.connections_spin)
         connections_row.addStretch(1)

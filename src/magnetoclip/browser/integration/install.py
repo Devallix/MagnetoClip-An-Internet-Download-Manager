@@ -55,11 +55,23 @@ def public_key_base64(public_key: rsa.RSAPublicKey) -> str:
     return base64.b64encode(spki).decode("ascii")
 
 
+# Parsing a 2048-bit PEM is ~65ms, and the Browser page asks for the extension
+# id once per installed browser every time it is opened. The key is stable on
+# disk, so cache the parsed key. The mtime/size are part of the key, so rotating
+# the file still picks up the new one.
+_KEY_CACHE: dict[tuple[str, int, int], rsa.RSAPublicKey] = {}
+
+
 def ensure_extension_key(data_dir: Path) -> tuple[Path, rsa.RSAPublicKey]:
     """Load or create the signing key used to derive a stable extension id."""
     private_path = data_dir / "browser" / "extension.pem"
     private_path.parent.mkdir(parents=True, exist_ok=True)
     if private_path.exists():
+        stat = private_path.stat()
+        cache_key = (str(private_path), stat.st_mtime_ns, stat.st_size)
+        cached = _KEY_CACHE.get(cache_key)
+        if cached is not None:
+            return private_path, cached
         with open(private_path, "rb") as handle:
             private_key = serialization.load_pem_private_key(
                 handle.read(), password=None
@@ -74,7 +86,13 @@ def ensure_extension_key(data_dir: Path) -> tuple[Path, rsa.RSAPublicKey]:
         with open(private_path, "wb") as handle:
             handle.write(pem)
     assert isinstance(private_key, rsa.RSAPrivateKey)
-    return private_path, private_key.public_key()
+    public_key = private_key.public_key()
+    try:
+        stat = private_path.stat()
+        _KEY_CACHE[(str(private_path), stat.st_mtime_ns, stat.st_size)] = public_key
+    except OSError:
+        pass
+    return private_path, public_key
 
 
 def host_manifest_path(browser: str, data_dir: Path) -> Path:
@@ -105,12 +123,17 @@ def _browser_native_dir(browser: str) -> str:
 
 
 def _native_hosts_registry_key(browser: str) -> str | None:
-    """HKCU registry path where a browser looks up native host manifests.
+    r"""HKCU registry path where a browser looks up native host manifests.
 
-    Returns ``None`` for browsers using file-based discovery (Firefox).
+    Although macOS/Linux Firefox reads manifests from a fixed filesystem
+    directory, on Windows it is registry-only: ``NativeManifests._winLookup``
+    checks ``HKCU\Software\Mozilla\NativeMessagingHosts\<name>`` (then HKLM)
+    and never scans ``%APPDATA%\Mozilla\NativeMessagingHosts\``. Writing just
+    the manifest file there makes native messaging appear to work on macOS/
+    Linux but silently fail on Windows, so Firefox must get a registry key.
     """
-    if browser in ("firefox",):
-        return None
+    if browser == "firefox":
+        return "Software\\Mozilla\\NativeMessagingHosts"
     return f"Software\\{_browser_native_dir(browser)}"
 
 
@@ -119,7 +142,11 @@ def _register_native_host(browser: str, manifest_path: Path) -> None:
     if key is None or winreg is None:
         return
     full_key = f"{key}\\{HOST_NAME}"
-    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, full_key) as hkey:
+    # Firefox's Windows lookup reads HKCU with WOW64_64 first (then HKLM).
+    # Without KEY_WOW64_64KEY a 32-bit app would write into Wow6432Node and
+    # Firefox would never see it.
+    access = winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY
+    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, full_key, 0, access) as hkey:
         winreg.SetValue(hkey, "", winreg.REG_SZ, str(manifest_path))
 
 
@@ -127,8 +154,9 @@ def _unregister_native_host(browser: str) -> None:
     key = _native_hosts_registry_key(browser)
     if key is None or winreg is None:
         return
+    access = winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_SET_VALUE) as parent:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0, access) as parent:
             winreg.DeleteKey(parent, HOST_NAME)
     except OSError:
         pass

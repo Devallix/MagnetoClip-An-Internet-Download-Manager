@@ -17,8 +17,10 @@ from magnetoclip.browser.skip import skip_all_active
 from magnetoclip.core.events.bus import Events
 from magnetoclip.database.repositories import (
     BrowserDetectionRepository,
+    BrowserRequestRepository,
     PendingCaptureRepository,
 )
+from magnetoclip.network.content import ensure_extension
 from magnetoclip.services.logging import get_logger
 
 from ..dialogs.capture import (
@@ -27,10 +29,35 @@ from ..dialogs.capture import (
     RESULT_SKIP_ALL,
     CaptureDialog,
 )
+from ..youtube_flow import youtube_quality_kwargs
 
 log = get_logger(__name__)
 
 POLL_INTERVAL_MS = 1200
+PLAYER_POLL_INTERVAL_MS = 250
+
+
+def _dominant_category(detection) -> str:
+    """Most common detection category on a page, for a category-aware toast.
+
+    Opening the toast lands directly on that filter; ``""`` (a genuine mix) opens
+    the unfiltered Detected page.
+    """
+    from ..categories import DETECTION_CATEGORIES, detection_category
+
+    counts: dict[str, int] = {}
+    for file in detection.files_json or []:
+        category = detection_category(
+            (file or {}).get("detected_type"), (file or {}).get("category")
+        )
+        counts[category] = counts.get(category, 0) + 1
+    if not counts:
+        return ""
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+        return ""
+    best = ranked[0][0]
+    return best if best in DETECTION_CATEGORIES and best != "other" else ""
 
 
 class CaptureWatcher(QObject):
@@ -45,6 +72,9 @@ class CaptureWatcher(QObject):
         self._timer = QTimer(self)
         self._timer.setInterval(POLL_INTERVAL_MS)
         self._timer.timeout.connect(self.poll)
+        self._player_timer = QTimer(self)
+        self._player_timer.setInterval(PLAYER_POLL_INTERVAL_MS)
+        self._player_timer.timeout.connect(self._handle_player_downloads)
 
     def _default_dialog(self, capture) -> CaptureDialog:
         return CaptureDialog(
@@ -58,17 +88,44 @@ class CaptureWatcher(QObject):
 
     def start(self) -> None:
         self._timer.start()
+        self._player_timer.start()
 
     def stop(self) -> None:
         self._timer.stop()
+        self._player_timer.stop()
 
     def poll(self) -> int:
         """Process detections and captures. Returns the number of items handled."""
-        handled = self._handle_detections()
+        handled = 0
+        handled += self._handle_detections()
         self._sync_downloads()
+        self._handle_navigation()
         if not self._dialog_open:
             handled += self._handle_captures()
         return handled
+
+    def _handle_navigation(self) -> int:
+        """Apply navigation the extension asked for through the host process.
+
+        The native host cannot touch this process's widgets or event bus, so an
+        "open the Detected page" request is persisted and claimed here. The claim
+        marks the row consumed, so a poll that raised no window (closing app,
+        headless tests) still does not replay the request forever.
+        """
+        with self.context.session_factory() as session:
+            from magnetoclip.database.repositories import BrowserRequestRepository
+
+            request = BrowserRequestRepository(session).next_queued(["navigate"])
+        if request is None:
+            return 0
+        payload = request.payload_json or {}
+        page = str(payload.get("page") or "")
+        if not page:
+            return 0
+        self.context.events.post(
+            Events.NAVIGATE, {"page": page, "category": payload.get("category") or ""}
+        )
+        return 1
 
     def _sync_downloads(self) -> None:
         """Mirror download rows written by the browser-host process into the GUI.
@@ -131,6 +188,86 @@ class CaptureWatcher(QObject):
                 manager.snapshot_item(download),
             )
 
+    # ----- player-button downloads -----------------------------------------
+
+    def _handle_player_downloads(self) -> int:
+        """Start a player stream in the GUI process using Detected-page logic."""
+        with self.context.session_factory() as session:
+            request = BrowserRequestRepository(session).next_queued(["player_download"])
+        if request is None:
+            return 0
+
+        payload = request.payload_json or {}
+        entry = payload.get("entry")
+        url = str(payload.get("url") or "").strip()
+        if not isinstance(entry, dict) or not url or not str(entry.get("url") or "").strip():
+            log.warning("player_download_request_invalid", request_id=request.id)
+            return 1
+
+        entry = dict(entry)
+        entry["url"] = str(entry.get("url") or url).strip()
+        entry.setdefault("page_url", payload.get("page_url") or "")
+        log.info(
+            "player_download_claimed",
+            request_id=request.id,
+            request_created_at=str(getattr(request, "created_at", "") or ""),
+            url=url,
+        )
+
+        # Reuse the exact code path behind Detected -> Download. The registry
+        # builds the page lazily, so this also works when the user never opened
+        # the Detected page during the current session.
+        from ..pages.detected import DetectedPage
+
+        window = self.parent()
+        page = None
+        pages = getattr(window, "_pages", None)
+        if pages is not None:
+            page = pages.get("Detected")
+        if page is None:
+            page = DetectedPage(self.context)
+
+        try:
+            log.info(
+                "player_download_start_entry_begin",
+                request_id=request.id,
+                url=url,
+            )
+            download_id = page.start_entry_download(entry)
+        except Exception as exc:  # noqa: BLE001 - leave the detection available
+            log.warning(
+                "player_download_start_failed",
+                request_id=request.id,
+                url=url,
+                error=str(exc),
+                exc_info=True,
+            )
+            self.context.events.post(
+                Events.NOTIFICATION_REQUESTED,
+                {
+                    "kind": "error",
+                    "title": "Could not start download",
+                    "body": str(exc),
+                },
+            )
+            return 1
+
+        if download_id is None:
+            log.info(
+                "player_download_start_cancelled",
+                request_id=request.id,
+                url=url,
+            )
+            return 1
+
+        log.info(
+            "player_download_started_in_gui",
+            request_id=request.id,
+            download_id=download_id,
+            url=url,
+        )
+        return 1
+
     # ----- page detections (notifications) -----
 
     def _handle_detections(self) -> int:
@@ -145,6 +282,7 @@ class CaptureWatcher(QObject):
                 repo.mark_notified(detection.id)
         for detection in detections:
             host = urlparse(detection.page_url).hostname or detection.page_url
+            category = _dominant_category(detection)
             self.context.events.post(
                 Events.NOTIFICATION_REQUESTED,
                 {
@@ -152,6 +290,7 @@ class CaptureWatcher(QObject):
                     "title": "Downloadable files detected",
                     "body": f"{detection.count} file(s) available on {host}",
                     "action": "detected",
+                    "category": category,
                 },
             )
         return len(detections)
@@ -205,17 +344,32 @@ class CaptureWatcher(QObject):
         if result == RESULT_SKIP:
             self._resolve(capture.id, "rejected")
             return
+        quality_kwargs = youtube_quality_kwargs(
+            self.context,
+            capture.url,
+            cookies=capture.cookies_json,
+            parent=self.parent(),
+        )
+        if quality_kwargs is None:
+            self._resolve(capture.id, "rejected")
+            return
         try:
             data = self._decode_data(getattr(capture, "data_base64", None))
             download = self.context.manager.add(
                 capture.url,
-                filename=dialog.filename(),
+                filename=ensure_extension(dialog.filename(), None, data),
                 save_dir=dialog.directory(),
                 category_name=dialog.category(),
                 connections_max=dialog.connections(),
-                headers={"Referer": capture.referrer} if capture.referrer else None,
+                headers={
+                    **(capture.headers_json or {}),
+                    **({"Referer": capture.referrer} if capture.referrer else {}),
+                    **({"User-Agent": capture.user_agent} if getattr(capture, "user_agent", None) else {}),
+                }
+                or None,
                 cookies=capture.cookies_json,
                 data=data,
+                **quality_kwargs,
             )
         except Exception as exc:  # noqa: BLE001 - surface add failures as a rejection
             log.warning("capture_add_failed", capture_id=capture.id, error=str(exc))

@@ -9,6 +9,7 @@ from .downloads import DownloadsPage
 from .overview import OverviewPage
 from .pause import PausePage
 from .settings import SettingsPage
+from .sites import DownloadSitesPage
 from .speedtest import SpeedTestPage
 from .torrents import TorrentsPage
 
@@ -16,6 +17,7 @@ __all__ = [
     "AnalyticsPage",
     "BrowserPage",
     "DetectedPage",
+    "DownloadSitesPage",
     "DownloadsPage",
     "OverviewPage",
     "PausePage",

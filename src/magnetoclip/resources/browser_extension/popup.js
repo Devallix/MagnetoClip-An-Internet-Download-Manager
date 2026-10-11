@@ -1,254 +1,240 @@
-const REFRESH_MS = 3000;
-const TIMEOUT_MS = 4000;
-const MAX_DETECTED = 8;
+// popup.js — the six-category dashboard.
+//
+// The popup deliberately shows no individual files: detection is now the
+// queue's job, and the queue is browsed and downloaded in MagnetoClip's
+// Detected page. The popup's whole job is to answer "what did the companion
+// find, and where do I download it?" with one button per category.
+"use strict";
 
-const TYPE_ICONS = {
-  video: "▶",
+const REFRESH_MS = 2000;
+const TIMEOUT_MS = 4000;
+
+const ICONS = {
+  images: "◈",
+  videos: "▶",
   audio: "♪",
-  image: "◈",
-  document: "◳",
-  archive: "▤",
-  software: "⚙",
-  stream: "⇢",
+  compressed: "▤",
+  documents: "◳",
+  other: "⋯",
 };
+
+const LABELS = {
+  images: "Images",
+  videos: "Videos",
+  audio: "Audio",
+  compressed: "Compressed",
+  documents: "Documents",
+  other: "Other",
+};
+
+const CATEGORIES = Array.isArray(MagnetoclipCategories.CATEGORIES)
+  ? MagnetoclipCategories.CATEGORIES
+  : Object.keys(LABELS);
 
 const els = {
   dot: document.getElementById("status-dot"),
   statusText: document.getElementById("status-text"),
-  statActive: document.getElementById("stat-active"),
-  statCompleted: document.getElementById("stat-completed"),
-  badgeIntegration: document.getElementById("badge-integration"),
-  badgeCapture: document.getElementById("badge-capture"),
-  badgeDefaultDownloader: document.getElementById("badge-default-downloader"),
-  detectedList: document.getElementById("detected-list"),
-  detectedEmpty: document.getElementById("detected-empty"),
+  total: document.getElementById("total-count"),
+  list: document.getElementById("categories"),
   errorBox: document.getElementById("error-box"),
   errorText: document.getElementById("error-text"),
-  btnRetry: document.getElementById("btn-retry"),
+  btnAll: document.getElementById("btn-all"),
+  btnRefresh: document.getElementById("btn-refresh"),
 };
 
 let inFlight = false;
 let watchdog = 0;
 
-function setOnline() {
-  els.dot.classList.remove("offline");
-  els.dot.classList.add("online");
+function showError(message) {
+  els.errorText.textContent = message;
+  els.errorBox.style.display = "block";
+}
+
+function clearError() {
+  els.errorText.textContent = "";
   els.errorBox.style.display = "none";
 }
 
-function setOffline() {
-  els.dot.classList.remove("online");
-  els.dot.classList.add("offline");
+function setConnected(connected) {
+  els.dot.classList.toggle("online", connected === true);
+  els.dot.classList.toggle("offline", connected === false);
 }
 
-function setChecking() {
-  els.dot.classList.remove("online", "offline");
-  els.statusText.textContent = "Checking connection…";
-}
+// The six rows are built once and only their counts change afterwards, so
+// opening a category never rebuilds (or loses hover/focus) the list.
+const rows = {};
 
-function setPill(el, enabled) {
-  el.textContent = enabled ? "Enabled" : "Disabled";
-  el.classList.toggle("enabled", enabled === true);
-}
+function buildRows() {
+  els.list.replaceChildren();
+  for (const category of CATEGORIES) {
+    const item = document.createElement("div");
+    item.className = "category empty";
 
-function setState(response) {
-  setOnline();
-  els.statusText.innerHTML = "Connected to <strong>MagnetoClip</strong>";
-  els.statActive.textContent = String(response.active || 0);
-  els.statCompleted.textContent = String(response.completed || 0);
-  setPill(els.badgeIntegration, response.integration_enabled);
-  setPill(els.badgeCapture, response.capture_enabled);
-  setPill(els.badgeDefaultDownloader, response.default_downloader);
-}
+    const icon = document.createElement("span");
+    icon.className = "category-icon " + category;
+    icon.textContent = ICONS[category] || "◈";
 
-function setError(message) {
-  setOffline();
-  els.statusText.textContent = "MagnetoClip not reachable";
-  els.errorText.textContent = message;
-  els.errorBox.style.display = "block";
-}
+    const label = document.createElement("span");
+    label.className = "category-label";
+    label.textContent = LABELS[category] || category;
 
-function typeLabel(type) {
-  return TYPE_ICONS[type] || "◈";
-}
+    const count = document.createElement("span");
+    count.className = "category-count zero";
+    count.textContent = "0";
 
-function showCaptureError(message) {
-  els.errorText.textContent = message;
-  els.errorBox.style.display = "block";
-}
+    const button = document.createElement("button");
+    button.className = "category-btn";
+    button.textContent = "Open";
+    button.disabled = true;
+    button.addEventListener("click", () => openDetected(category, button));
 
-function restoreButton(button) {
-  if (!button) {
-    return;
+    item.append(icon, label, count, button);
+    els.list.append(item);
+    rows[category] = { item: item, count: count, button: button };
   }
-  button.disabled = false;
-  button.textContent = "Download";
-  button.classList.remove("sent");
 }
 
-function sendDownload(file, pageUrl, button) {
-  let settled = false;
+function renderCounts(counts, total) {
+  for (const category of CATEGORIES) {
+    const row = rows[category];
+    if (!row) {
+      continue;
+    }
+    const value = Number(counts && counts[category]) || 0;
+    row.count.textContent = String(value);
+    row.count.classList.toggle("zero", value === 0);
+    row.item.classList.toggle("empty", value === 0);
+    // A category with nothing in it still opens the page — the user may want
+    // to add downloads there — but it is not the primary action.
+    row.button.disabled = false;
+  }
+  const sum = Number(total) || 0;
+  els.total.textContent = String(sum);
+  els.btnAll.disabled = false;
+}
+
+// Ask the background script to raise MagnetoClip's Detected page, filtered to
+// this category. The background owns the queue flush, the protocol launch and
+// the "MagnetoClip isn't running" notification; the popup only relays.
+function openDetected(category, button) {
+  if (button) {
+    button.disabled = true;
+  }
+  const label = LABELS[category] || category;
   try {
-    chrome.runtime.sendMessage(
-      {
-        type: "download_file",
-        url: file.url,
-        filename: file.filename || "",
-        referrer: pageUrl,
-        detected_type: file.detected_type || "file",
-      },
-      (response) => {
-        settled = true;
-        if (chrome.runtime.lastError) {
-          restoreButton(button);
-          showCaptureError(chrome.runtime.lastError.message);
-          return;
+    chrome.runtime.sendMessage({ type: "open_detected", category: category }, (response) => {
+      if (chrome.runtime.lastError) {
+        if (button) {
+          button.disabled = false;
         }
-        if (!response) {
-          restoreButton(button);
-          showCaptureError("No response from MagnetoClip.");
-          return;
-        }
-        if (response.type === "capture_error") {
-          restoreButton(button);
-          showCaptureError(
-            response.message || "MagnetoClip could not download this file."
-          );
-          return;
-        }
-        if (response.type === "capture_skipped") {
-          restoreButton(button);
-          showCaptureError(
-            response.message ||
-              "'Skip all' is active in MagnetoClip — turn it off in its settings."
-          );
-          return;
-        }
-        // capture_ok / capture_pending: the app has it; the confirmation
-        // dialog (with full file info) appears in MagnetoClip itself.
-      }
-    );
-    setTimeout(() => {
-      if (settled) {
+        showError(chrome.runtime.lastError.message);
         return;
       }
-      settled = true;
-      restoreButton(button);
-      showCaptureError("MagnetoClip did not respond. Is the app running?");
-    }, TIMEOUT_MS);
+      if (!response) {
+        if (button) {
+          button.disabled = false;
+        }
+        showError("No response from the MagnetoClip background script.");
+        return;
+      }
+      if (button) {
+        button.textContent = "Sent";
+        setTimeout(() => {
+          button.textContent = "Open";
+          button.disabled = false;
+        }, 1200);
+      }
+      clearError();
+      if (label) {
+        window.close();
+      }
+    });
   } catch (error) {
+    if (button) {
+      button.disabled = false;
+    }
     if (/Extension context invalidated/i.test(String(error && error.message))) {
-      setError("The extension was updated. Reload this page and try again.");
-      restoreButton(button);
+      showError("The extension was updated. Reload this page and try again.");
     }
   }
 }
 
-function renderDetected(data) {
-  // Blob/data entries only resolve inside their creating page; the popup has
-  // no bytes to hand over, so offering them would just fail. They remain
-  // reachable through MagnetoClip's capture flow.
-  const files = ((data && data.files) || []).filter(
-    (file) => file && file.url && !/^(blob|data):/i.test(file.url)
-  );
-  els.detectedList.replaceChildren();
-  if (!files.length) {
-    els.detectedEmpty.style.display = "block";
-    els.detectedList.style.display = "none";
-    return;
-  }
-  els.detectedEmpty.style.display = "none";
-  els.detectedList.style.display = "flex";
-  for (const file of files.slice(0, MAX_DETECTED)) {
-    const item = document.createElement("div");
-    item.className = "detected-item";
-
-    const type = document.createElement("span");
-    type.className = "detected-type " + (file.detected_type || "file");
-    type.textContent = typeLabel(file.detected_type);
-
-    const info = document.createElement("div");
-    info.className = "detected-info";
-
-    const name = document.createElement("div");
-    name.className = "detected-name";
-    name.textContent = file.filename || file.url;
-    name.title = file.url;
-
-    const url = document.createElement("div");
-    url.className = "detected-url";
-    url.textContent = file.url;
-
-    info.append(name, url);
-
-    const button = document.createElement("button");
-    button.className = "detected-btn";
-    button.textContent = "Download";
-    button.addEventListener("click", () => {
-      sendDownload(file, (data && data.url) || "", button);
-      button.textContent = "Sent";
-      button.classList.add("sent");
-      button.disabled = true;
-    });
-
-    item.append(type, info, button);
-    els.detectedList.append(item);
-  }
-}
-
-function queryDetected() {
-  try {
-    chrome.runtime.sendMessage({ type: "detected_files" }, (response) => {
-      if (chrome.runtime.lastError) {
-        return;
-      }
-      if (response && response.type === "detected_files_ok") {
-        renderDetected(response);
-      }
-    });
-  } catch (error) {
-    /* extension was reloaded; next refresh() will recover */
-  }
-}
-
-function query() {
+function refresh() {
   if (inFlight) {
     return;
   }
   inFlight = true;
   clearTimeout(watchdog);
-  chrome.runtime.sendMessage({ type: "status" }, (response) => {
-    clearTimeout(watchdog);
+  try {
+    chrome.runtime.sendMessage({ type: "detection_status" }, (response) => {
+      clearTimeout(watchdog);
+      inFlight = false;
+      if (chrome.runtime.lastError) {
+        setConnected(false);
+        showError(chrome.runtime.lastError.message);
+        return;
+      }
+      if (!response || response.type !== "detection_status_ok") {
+        setConnected(false);
+        showError(
+          (response && response.message) ||
+            "MagnetoClip isn't running. Open MagnetoClip to view and download your detected files."
+        );
+        return;
+      }
+      setConnected(true);
+      clearError();
+      renderCounts(response.counts, response.total);
+    });
+  } catch (error) {
     inFlight = false;
-    if (chrome.runtime.lastError) {
-      setError(chrome.runtime.lastError.message);
-      return;
-    }
-    if (!response) {
-      setError("No response from the MagnetoClip background page.");
-      return;
-    }
-    if (response.type !== "status_ok") {
-      setError(response.message || "MagnetoClip returned an unexpected response.");
-      return;
-    }
-    setState(response);
-  });
+    setConnected(false);
+  }
   watchdog = setTimeout(() => {
     if (inFlight) {
       inFlight = false;
-      setError("Timed out waiting for MagnetoClip. Is the app running?");
+      setConnected(false);
+      showError("Timed out waiting for the MagnetoClip background script.");
     }
   }, TIMEOUT_MS);
 }
 
-function refresh() {
-  query();
-  queryDetected();
+// The Refresh button discards everything captured so far and detects the
+// current page again, so the counts always describe one fresh pass.
+function rescan() {
+  if (inFlight) {
+    return;
+  }
+  inFlight = true;
+  clearTimeout(watchdog);
+  chrome.runtime.sendMessage({ type: "rescan_detections" }, (response) => {
+    clearTimeout(watchdog);
+    inFlight = false;
+    if (chrome.runtime.lastError) {
+      setConnected(false);
+      showError(chrome.runtime.lastError.message);
+      return;
+    }
+    if (!response || response.type !== "rescan_detections_ok") {
+      setConnected(false);
+      showError((response && response.message) || "Could not refresh detections.");
+      return;
+    }
+    setConnected(true);
+    clearError();
+    renderCounts(response.counts, response.total);
+  });
+  watchdog = setTimeout(() => {
+    if (inFlight) {
+      inFlight = false;
+      setConnected(false);
+      showError("Timed out waiting for the MagnetoClip background script.");
+    }
+  }, TIMEOUT_MS);
 }
 
-els.btnRetry.addEventListener("click", refresh);
-
-setChecking();
+buildRows();
+els.btnAll.addEventListener("click", () => openDetected("", els.btnAll));
+els.btnRefresh.addEventListener("click", rescan);
 refresh();
 setInterval(refresh, REFRESH_MS);

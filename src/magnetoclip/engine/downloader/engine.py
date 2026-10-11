@@ -27,7 +27,12 @@ from magnetoclip.network.proxy.profiles import ProxySpec
 from magnetoclip.security.safe_names import sanitize_filename
 from magnetoclip.services.logging.setup import get_logger
 
-from ..resume.mclip import MClipState, SegmentState, reconcile_part_sizes
+from ..resume.mclip import (
+    MClipState,
+    SegmentState,
+    reconcile_inplace,
+    reconcile_part_sizes,
+)
 from ..retry.policy import (
     PermanentError,
     RangeNotSupported,
@@ -140,6 +145,8 @@ class DownloadTask:
         self._monitor = ThroughputMonitor()
         self._last_persist = 0.0
         self._active_connections = 0
+        self._in_place = False
+        self._in_place_ok = True
 
         self.result_state: str | None = None
         self.error: str | None = None
@@ -227,8 +234,21 @@ class DownloadTask:
 
         if not self.state.segments:
             self._plan_segments()
-        reconcile_part_sizes(self.state)
+        self._in_place = bool(
+            self._in_place_ok
+            and self.spec.in_place
+            and self.state.total_size
+            and self.state.total_size > 0
+        )
+        if self._in_place:
+            reconcile_inplace(self.state)
+        else:
+            reconcile_part_sizes(self.state)
         self._reconcile_segments_for_size()
+        if self._in_place:
+            # _reconcile_segments_for_size may have shrunk a range; re-clamp.
+            reconcile_inplace(self.state)
+            self._prepare_inplace_file()
 
         self._set_state("downloading")
         if not self._running.is_set():
@@ -247,11 +267,15 @@ class DownloadTask:
             cancel=self._cancel,
             monitor=self._monitor,
             on_segment_done=self._on_segment_done,
+            in_place=self._in_place,
         )
         await pool.run()
         self._active_connections = 0
 
-        await asyncio.to_thread(self._merge_parts)
+        if self._in_place:
+            await asyncio.to_thread(self._finalize_inplace)
+        else:
+            await asyncio.to_thread(self._merge_parts)
         if self.spec.hash_algo and self.spec.hash_expected:
             self._set_state("verifying")
             self._persist()
@@ -282,6 +306,8 @@ class DownloadTask:
                 part.unlink()
             except OSError:
                 pass
+        self._in_place_ok = False
+        self._in_place = False
         self.spec.connections_max = 1
         self.state.segments = [SegmentState(index=0, start=0, end=None, written=0)]
         self.state.state = "downloading"
@@ -404,15 +430,46 @@ class DownloadTask:
                 except OSError:
                     pass
 
+    def _prepare_inplace_file(self) -> None:
+        """Preallocate the final file so segments can write at their offset."""
+        total = self.state.total_size
+        if not total or total <= 0:
+            return
+        final = self.spec.final_path
+        final.parent.mkdir(parents=True, exist_ok=True)
+        current = final.stat().st_size if final.exists() else -1
+        if current == total:
+            return
+        with open(final, "r+b" if current >= 0 else "wb") as handle:
+            handle.truncate(total)
+
+    def _finalize_inplace(self) -> None:
+        """Drop any over-allocation left when the remote file shrank."""
+        total = self.state.total_size
+        final = self.spec.final_path
+        if not total or not final.exists():
+            return
+        try:
+            if final.stat().st_size > total:
+                with open(final, "r+b") as handle:
+                    handle.truncate(total)
+        except OSError:
+            pass
+
     def _merge_parts(self) -> None:
         final = self.spec.final_path
         final.parent.mkdir(parents=True, exist_ok=True)
+        # Tail-rebalancing appends split suffixes with higher indexes than
+        # earlier ranges, so order parts by byte range, not by segment index.
+        ordered = sorted(self.state.segments, key=lambda segment: segment.start)
         with open(final, "wb") as out:
-            for part in self.state.part_paths:
+            for segment in ordered:
+                part = self.state.part_path(segment.index)
                 if part.exists():
                     with open(part, "rb") as fh:
                         shutil.copyfileobj(fh, out)
-        for part in self.state.part_paths:
+        for segment in ordered:
+            part = self.state.part_path(segment.index)
             try:
                 part.unlink()
             except OSError:
@@ -623,7 +680,7 @@ def spec_from_url(
     headers: dict[str, str] | None = None,
     auth: AuthSpec | None = None,
     proxy: ProxySpec | None = None,
-    connections_max: int = 8,
+    connections_max: int = 16,
     retry_max: int = 5,
     retry_base: float = 1.0,
     timeout: float = 30.0,
@@ -632,6 +689,7 @@ def spec_from_url(
     user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     cookies: dict[str, str] | None = None,
     priority: int = 0,
+    in_place: bool = False,
 ) -> DownloadSpec:
     """Convenience builder that sanitizes the destination filename."""
     safe_name = sanitize_filename(filename) if filename else None
@@ -652,4 +710,5 @@ def spec_from_url(
         hash_expected=hash_expected,
         user_agent=user_agent,
         priority=priority,
+        in_place=in_place,
     )

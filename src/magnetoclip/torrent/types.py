@@ -20,8 +20,10 @@ class TorrentSpec:
     file_priorities: list[int] | None = None
     upload_limit: int = 0
     download_limit: int = 0
+    connections_max: int = 0
     seed_mode: bool = False
     paused: bool = False
+    resume_sidecar: str = ""
 
     @property
     def final_path(self) -> Path:

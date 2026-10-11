@@ -1,10 +1,10 @@
 {
-    "version": "0.2.8",
-    "download_url": "https://github.com/Devallix/MagnetoClip-An-Internet-Download-Manager/raw/refs/heads/main/releases/MagnetoClip-0.2.8.zip",
-    "release_notes": "Stream download bug fixes",
-    "release_date": "2026-08-25",
+    "version": "1.1.0",
+    "download_url": "https://github.com/Devallix/MagnetoClip-An-Internet-Download-Manager/raw/refs/heads/main/releases/MagnetoClip-1.1.0.zip",
+    "release_notes": "Version 1.1.0: merge-free in-place downloads (no post-download merge, lower disk usage), a faster multi-connection engine (HTTP/2, adaptive connection allocation, connection rebalancing, 16 default connections per download), performance tuning for large torrents (disk cache, hashing threads, request queue, TCP preference), a per-video resolution picker and playlist downloads, browser-assisted capture for protected streams, and smoother completion notifications.",
+    "release_date": "2026-10-11",
     "min_version": "0.1.0",
-    "size_bytes": 146760216,
-    "filename": "MagnetoClip-0.2.8.zip",
-    "sha256": "768225da1fdf2b3fa033d3a3fac6f122510ad89691322088b71d5bf4b407d100"
+    "size_bytes": 147044616,
+    "filename": "MagnetoClip-1.1.0.zip",
+    "sha256": "5384c97ab149ec2bda5f970ab6b022493f83e5874e31fbe99d0c5e8f93540d7d"
 }

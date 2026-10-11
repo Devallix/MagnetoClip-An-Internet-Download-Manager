@@ -23,6 +23,7 @@ class Events:
     NETWORK_CHANGED = "network.changed"
     BROWSER_EVENT = "browser.event"
     BROWSER_STATUS_CHANGED = "browser.status_changed"
+    NAVIGATE = "ui.navigate"
     PROXIES_CHANGED = "proxies.changed"
     ANALYTICS_REFRESHED = "analytics.refreshed"
     MEDIA_DETECTED = "media.detected"

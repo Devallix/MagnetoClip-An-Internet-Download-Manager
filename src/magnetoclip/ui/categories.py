@@ -4,6 +4,81 @@ from __future__ import annotations
 
 from typing import Any
 
+# The six detection categories the browser extension queues resources into. They
+# are the vocabulary of the Detected page filters, the ``magneto://open-detected``
+# URI and the extension popup, and they must stay identical on both sides.
+DETECTION_CATEGORIES = [
+    "images",
+    "videos",
+    "audio",
+    "compressed",
+    "documents",
+    "other",
+]
+
+DETECTION_CATEGORY_LABELS = {
+    "images": "Images",
+    "videos": "Videos",
+    "audio": "Audio",
+    "compressed": "Compressed",
+    "documents": "Documents",
+    "other": "Other",
+}
+
+# Detection category -> the sidebar/detected-type vocabulary used for icons and
+# the Type column.
+DETECTION_CATEGORY_TO_TYPE = {
+    "images": "image",
+    "videos": "video",
+    "audio": "audio",
+    "compressed": "archive",
+    "documents": "document",
+    "other": "other",
+}
+
+_DETECTION_TYPE_TO_CATEGORY = {
+    "image": "images",
+    "video": "videos",
+    "audio": "audio",
+    "archive": "compressed",
+    "compressed": "compressed",
+    "document": "documents",
+    "ebook": "documents",
+    "subtitle": "documents",
+    "software": "other",
+    "torrent": "other",
+    "webpage": "other",
+    "stream": "videos",
+    "unknown": "other",
+    "other": "other",
+}
+
+
+def normalize_detection_category(value: Any) -> str:
+    """Normalize a category filter; ``""`` means "all"."""
+    raw = str(value or "").strip().lower()
+    if not raw or raw == "all":
+        return ""
+    if raw in DETECTION_CATEGORIES:
+        return raw
+    if f"{raw}s" in DETECTION_CATEGORIES:
+        return f"{raw}s"
+    return _DETECTION_TYPE_TO_CATEGORY.get(raw, "")
+
+
+def detection_category(detected_type: Any, category: Any = None) -> str:
+    """Category of a detection row, honouring the category the extension sent.
+
+    The extension classifies centrally and sends ``category`` alongside the
+    app-level ``detected_type``; the type is only used as a fallback so rows
+    written by older builds still land somewhere sensible.
+    """
+    explicit = normalize_detection_category(category)
+    if explicit:
+        return explicit
+    return _DETECTION_TYPE_TO_CATEGORY.get(str(detected_type or "").lower(), "other")
+
+
 CATEGORY_ORDER = [
     "image",
     "video",

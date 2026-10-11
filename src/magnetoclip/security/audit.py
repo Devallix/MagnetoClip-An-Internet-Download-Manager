@@ -33,7 +33,7 @@ class SecurityAudit:
                     }
                 )
 
-        max_connections = int(self.context.settings.get("downloads.connections_per_download", 8) or 0)
+        max_connections = int(self.context.settings.get("downloads.connections_per_download", 16) or 0)
         if max_connections > 32:
             result.append(
                 {

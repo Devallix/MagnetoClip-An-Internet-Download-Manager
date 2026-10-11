@@ -52,12 +52,30 @@ def test_allocator_grows_on_improvement():
     assert allocator.evaluate(8000) == 16
 
 
-def test_allocator_stops_when_saturated():
+def test_allocator_stops_only_on_sustained_plateau():
     allocator = AdaptiveAllocator(16, minimum_gain=0.1)
     allocator.evaluate(1000)
     assert allocator.evaluate(1100) == 4  # 10% gain
-    assert allocator.evaluate(1110) == 4  # <10% gain -> stopped
+    assert allocator.evaluate(1110) == 4  # weak sample 1 — still re-armed
+    assert allocator.evaluate(1120) == 4  # weak sample 2 — plateau stops growth
     assert allocator.evaluate(5000) == 4  # no further growth
+
+
+def test_allocator_recovers_after_temporary_dip():
+    allocator = AdaptiveAllocator(16, minimum_gain=0.1)
+    allocator.evaluate(1000)
+    assert allocator.evaluate(1100) == 4  # 10% gain
+    assert allocator.evaluate(1110) == 4  # weak sample 1 — baseline re-arms
+    assert allocator.evaluate(3000) == 8  # recovery doubles again
+    assert allocator.evaluate(6000) == 16
+
+
+def test_allocator_stops_when_per_connection_efficiency_drops():
+    allocator = AdaptiveAllocator(16, minimum_gain=0.1)
+    allocator.evaluate(1000)  # active 2
+    assert allocator.evaluate(2200) == 4  # strong jump: active 4, best ppc 1100
+    assert allocator.evaluate(2100) == 4  # ppc 525 < 550 -> per-conn capped
+    assert allocator.evaluate(9000) == 4  # permanently stopped
 
 
 def test_allocator_never_exceeds_max():

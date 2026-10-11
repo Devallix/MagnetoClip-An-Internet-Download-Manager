@@ -4,7 +4,7 @@ from magnetoclip.app.lifecycle import build_context
 from magnetoclip.browser.skip import enable_skip_all, skip_all_active
 from magnetoclip.core.events.bus import Events
 from magnetoclip.ui.dialogs.add_url import AddUrlDialog
-from magnetoclip.ui.main_window import MainWindow
+from magnetoclip.ui.main_window import NAV_ITEMS, MainWindow
 from magnetoclip.ui.themes import build_qss
 from magnetoclip.version import __version__
 
@@ -39,7 +39,10 @@ def test_main_window_constructs(qtbot, context):
     qtbot.addWidget(window)
     assert window.windowTitle() == f"MagnetoClip {__version__}"
     assert window.sidebar is not None
-    assert window.stack.count() == 10
+    # Pages are built on first use; every nav entry must still resolve.
+    for _key, label in NAV_ITEMS:
+        assert window._pages[label] is not None
+    assert window.stack.count() == len(NAV_ITEMS)
 
 
 def test_navigation_switches_pages(qtbot, context):
@@ -116,6 +119,28 @@ def test_settings_torrent_queue_limits_roundtrip(qtbot, context):
     assert context.settings.get("torrent.max_active_downloads") == 2
 
 
+def test_settings_torrent_tuning_roundtrip(qtbot, context):
+    window = MainWindow(context)
+    qtbot.addWidget(window)
+    window._activate("Settings")
+    page = window._pages["Settings"]
+    assert context.settings.get("torrent.disk_cache_mb") == 256
+    assert context.settings.get("torrent.hashing_threads") == 4
+    assert context.settings.get("torrent.max_out_request_queue") == 1500
+    assert context.settings.get("torrent.prefer_tcp") is True
+
+    page.torrent_disk_cache_spin.setValue(512)
+    page.torrent_hashing_threads_spin.setValue(2)
+    page.torrent_request_queue_spin.setValue(800)
+    page.torrent_prefer_tcp_check.setChecked(False)
+    page.save()
+
+    assert context.settings.get("torrent.disk_cache_mb") == 512
+    assert context.settings.get("torrent.hashing_threads") == 2
+    assert context.settings.get("torrent.max_out_request_queue") == 800
+    assert context.settings.get("torrent.prefer_tcp") is False
+
+
 def test_network_event_updates_status_label(qtbot, context):
     window = MainWindow(context)
     qtbot.addWidget(window)
@@ -169,7 +194,10 @@ def test_categories_page_removed(qtbot, context):
     qtbot.addWidget(window)
     assert "categories" not in window._nav_buttons
     assert "Categories" not in window._pages
-    assert window.stack.count() == 10
+    # Build the lazy pages so the count reflects the full nav.
+    for _key, label in NAV_ITEMS:
+        assert window._pages[label] is not None
+    assert window.stack.count() == len(NAV_ITEMS)
 
 
 def test_queue_and_scheduler_pages_removed(qtbot, context):
@@ -265,7 +293,8 @@ def test_icons_load_from_bundled_assets(qtbot):
     )
 
     for name in ("overview", "downloads", "completed", "analytics",
-                 "browser", "settings", "about", "all", "menu", "torrents"):
+                 "browser", "sites", "settings", "about", "all", "menu",
+                 "torrents"):
         assert not nav_icon(name).isNull(), name
     for name in ("add", "start", "pause", "remove"):
         assert not tool_icon(name).isNull(), name
@@ -370,6 +399,119 @@ def test_capture_watcher_skip_all_click_parks_to_detection(qtbot, context):
         }
     assert "https://example.com/a.zip" in urls
     assert "https://example.com/b.zip" in urls
+
+
+def test_capture_watcher_forwards_youtube_quality_kwargs_to_add(qtbot, context, monkeypatch):
+    """A YouTube capture accepted via the capture dialog must NOT bypass the
+    shared quality step — the resolution kwargs it resolves (or None on cancel)
+    are forwarded straight into manager.add so the Detect page never adds a
+    silent-quality download for a YouTube video."""
+    import magnetoclip.ui.components.capture_watcher as watcher_module
+    from magnetoclip.database.repositories import PendingCaptureRepository
+    from magnetoclip.ui.components.capture_watcher import CaptureWatcher
+    from magnetoclip.ui.dialogs.capture import RESULT_DOWNLOAD_NOW
+
+    captured_kwargs: dict = {}
+    sentinel_quality_kwargs = {
+        "youtube_quality": "720p",
+        "youtube_height": 720,
+        "youtube_requested_quality": "720",
+    }
+
+    def fake_quality_kwargs(context, url, *, cookies=None, parent=None):
+        captured_kwargs["url"] = url
+        captured_kwargs["cookies"] = cookies
+        return sentinel_quality_kwargs
+
+    def fake_add(url, *args, _monkey_manager=None, **kwargs):
+        captured_kwargs["add_kwargs"] = kwargs
+        return type("FakeDownload", (), {"id": 99})()
+
+    monkeypatch.setattr(watcher_module, "youtube_quality_kwargs", fake_quality_kwargs)
+
+    with context.session_factory() as session:
+        capture = PendingCaptureRepository(session).add(
+            "https://www.youtube.com/watch?v=abcdefghij", filename="video"
+        )
+
+    watcher = CaptureWatcher(context)
+    monkeypatch.setattr(context.manager, "add", fake_add)
+
+    watcher._apply_decision(
+        capture,
+        RESULT_DOWNLOAD_NOW,
+        _StubCaptureDialog(context),
+    )
+
+    assert captured_kwargs["url"] == "https://www.youtube.com/watch?v=abcdefghij"
+    assert captured_kwargs["add_kwargs"]["youtube_quality"] == "720p"
+    assert captured_kwargs["add_kwargs"]["youtube_height"] == 720
+
+    with context.session_factory() as session:
+        resolved = PendingCaptureRepository(session).get(capture.id)
+        assert resolved is not None and resolved.status == "approved"
+        assert resolved.download_id == 99
+
+
+class _StubCaptureDialog:
+    """Minimal stand-in for the real CaptureDialog during watcher tests."""
+
+    def __init__(self, context):
+        self._context = context
+
+    def filename(self):
+        return "video.mp4"
+
+    def directory(self):
+        return None
+
+    def category(self):
+        return None
+
+    def connections(self):
+        return None
+
+
+def test_capture_watcher_applies_navigation_queued_by_the_host(qtbot, context):
+    """The extension's "open Detected" request crosses a process boundary.
+
+    The native host can only write to the database, so the request is queued
+    there and the UI poll turns it into a local NAVIGATE event exactly once.
+    """
+    from magnetoclip.core.events.bus import Events
+    from magnetoclip.database.repositories import BrowserRequestRepository
+    from magnetoclip.ui.components.capture_watcher import CaptureWatcher
+
+    with context.session_factory() as session:
+        BrowserRequestRepository(session).add(
+            "navigate", payload={"page": "detected", "category": "videos"}
+        )
+
+    navigations: list[dict] = []
+    context.events.connect(Events.NAVIGATE, navigations.append)
+
+    watcher = CaptureWatcher(context)
+    assert watcher._handle_navigation() == 1
+    assert navigations == [{"page": "detected", "category": "videos"}]
+
+    # Claimed, so it is not replayed on the next poll.
+    assert watcher._handle_navigation() == 0
+    assert len(navigations) == 1
+
+
+def test_capture_watcher_navigation_does_not_steal_extension_requests(qtbot, context):
+    from magnetoclip.database.models import BrowserRequest
+    from magnetoclip.ui.components.capture_watcher import CaptureWatcher
+
+    with context.session_factory() as session:
+        from magnetoclip.database.repositories import BrowserRequestRepository
+
+        BrowserRequestRepository(session).add("fetch_blob", payload={"url": "blob:x"})
+
+    watcher = CaptureWatcher(context)
+    assert watcher._handle_navigation() == 0
+    with context.session_factory() as session:
+        assert session.query(BrowserRequest).one().status == "queued"
 
 
 def test_capture_watcher_suppresses_dialog_while_skip_all_active(qtbot, context):
@@ -540,6 +682,36 @@ def test_capture_dialog_preselects_category(qtbot, context):
     )
     qtbot.addWidget(dialog)
     assert dialog.category() == "Videos"
+
+
+def test_capture_dialog_prefills_default_name(qtbot, context):
+    from magnetoclip.ui.dialogs.capture import (
+        CaptureDialog,
+        default_capture_name,
+    )
+
+    proxy_url = "https://web.telegram.org/a/progressive/document5832642300378882280"
+    assert (
+        default_capture_name(proxy_url, "video")
+        == "document5832642300378882280.mp4"
+    )
+    assert (
+        default_capture_name(proxy_url, "image")
+        == "document5832642300378882280.jpg"
+    )
+    assert default_capture_name("https://cdn.example.com/song.mp3", None) == "song.mp3"
+    assert default_capture_name("", None) == ""
+
+    # A proxy-link capture shows at least a usable default name, so the user is
+    # never forced to type one.
+    dialog = CaptureDialog(
+        context,
+        url=proxy_url,
+        filename="",
+        detected_type="video",
+    )
+    qtbot.addWidget(dialog)
+    assert dialog.filename_edit.text() == "document5832642300378882280.mp4"
 
 
 def test_download_context_menu_queued(qtbot, context):
@@ -799,6 +971,206 @@ def test_detected_page_renders_detections(qtbot, context):
         assert len(BrowserDetectionRepository(session).list_detections()) == 1
 
 
+def test_detected_page_download_preserves_stream_context(qtbot, context):
+    """Downloading a queued manifest must carry its capture context.
+
+    Regression guard: the queue hands over cookies as a header string, and the
+    stream pipeline needs cookies/headers/UA/player frame to fetch segments.
+    Dropping them made every m3u8 fail with a bot-wall 403.
+    """
+    from PySide6.QtCore import Qt
+
+    from magnetoclip.database.repositories import BrowserDetectionRepository
+
+    with context.session_factory() as session:
+        BrowserDetectionRepository(session).add(
+            "https://player.example.com/embed/9",
+            count=1,
+            files=[
+                {
+                    "url": "https://cdn.example.com/hls/master.m3u8",
+                    "filename": "master.m3u8",
+                    "detected_type": "video",
+                    "category": "videos",
+                    "page_url": "https://player.example.com/embed/9",
+                    "headers": {"Origin": "https://player.example.com"},
+                    "cookies": {"sid": "1", "cf_clearance": "abc"},
+                    "user_agent": "Mozilla/5.0 (X11; Linux x86_64)",
+                    "referrer": "https://player.example.com/embed/9",
+                    "frame_url": "https://player.example.com/embed/9",
+                }
+            ],
+        )
+
+    window = MainWindow(context)
+    qtbot.addWidget(window)
+    window._activate("Detected")
+    page = window._pages["Detected"]
+    assert len(page._files) == 1
+
+    page.table.item(0, 0).setCheckState(Qt.Checked)
+    page._download_selected()
+
+    download = next(
+        d
+        for d in context.manager.list_snapshots()
+        if d["filename"] == "master.m3u8"
+    )
+    with context.session_factory() as session:
+        from magnetoclip.database.repositories import DownloadRepository
+
+        row = DownloadRepository(session).get(download["id"])
+    assert row.stream_context_json is not None
+    stored = row.stream_context_json
+    assert stored["cookies"] == {"sid": "1", "cf_clearance": "abc"}
+    assert stored["user_agent"] == "Mozilla/5.0 (X11; Linux x86_64)"
+    assert stored["frame_url"] == "https://player.example.com/embed/9"
+    assert stored["headers"]["Origin"] == "https://player.example.com"
+    # A cookie string here would raise inside the download manager.
+    merged = {k.lower(): v for k, v in (row.headers_json or {}).items()}
+    assert merged["cookie"] == "sid=1; cf_clearance=abc"
+
+
+def test_detected_page_download_accepts_cookie_header_string(qtbot, context):
+    """Rows written before the cookie fix still hold a header string."""
+    from PySide6.QtCore import Qt
+
+    from magnetoclip.database.repositories import BrowserDetectionRepository
+
+    with context.session_factory() as session:
+        BrowserDetectionRepository(session).add(
+            "https://example.com/page",
+            count=1,
+            files=[
+                {
+                    "url": "https://example.com/clip.mp4",
+                    "filename": "clip.mp4",
+                    "detected_type": "video",
+                    "page_url": "https://example.com/page",
+                    "cookies": "sid=1; theme=dark",
+                }
+            ],
+        )
+
+    window = MainWindow(context)
+    qtbot.addWidget(window)
+    window._activate("Detected")
+    page = window._pages["Detected"]
+    page.table.item(0, 0).setCheckState(Qt.Checked)
+    page._download_selected()
+
+    download = next(
+        d for d in context.manager.list_snapshots() if d["filename"] == "clip.mp4"
+    )
+    with context.session_factory() as session:
+        from magnetoclip.database.repositories import DownloadRepository
+
+        row = DownloadRepository(session).get(download["id"])
+    merged = {k.lower(): v for k, v in (row.headers_json or {}).items()}
+    assert merged["cookie"] == "sid=1; theme=dark"
+
+
+def test_detected_page_filters_by_the_six_categories(qtbot, context):
+    from PySide6.QtCore import Qt
+
+    from magnetoclip.database.repositories import BrowserDetectionRepository
+
+    with context.session_factory() as session:
+        BrowserDetectionRepository(session).add(
+            "https://example.com/page",
+            count=4,
+            files=[
+                {"url": "https://example.com/a.mp4", "filename": "a.mp4", "category": "videos"},
+                {"url": "https://example.com/b.mp3", "filename": "b.mp3", "category": "audio"},
+                {
+                    "url": "https://example.com/c.zip",
+                    "filename": "c.zip",
+                    "category": "compressed",
+                },
+                # No category: the old singular vocabulary still resolves.
+                {
+                    "url": "https://example.com/d.pdf",
+                    "filename": "d.pdf",
+                    "detected_type": "document",
+                },
+            ],
+        )
+
+    window = MainWindow(context)
+    qtbot.addWidget(window)
+    page = window._pages["Detected"]
+
+    page.set_filter("videos")
+    assert [f["filename"] for f in page._files] == ["a.mp4"]
+
+    page.set_filter("audio")
+    assert [f["filename"] for f in page._files] == ["b.mp3"]
+
+    page.set_filter("compressed")
+    assert [f["filename"] for f in page._files] == ["c.zip"]
+
+    # detected_type alone places an uncategorized legacy row.
+    page.set_filter("documents")
+    assert [f["filename"] for f in page._files] == ["d.pdf"]
+
+    page.set_filter("")
+    assert len(page._files) == 4
+
+    # Selecting "All" is the same as no filter.
+    page._filter_buttons["all"].click()
+    assert len(page._files) == 4
+    assert page._category == ""
+
+    page.set_filter("nonsense")
+    assert len(page._files) == 4, "an unknown filter shows everything rather than nothing"
+
+    page.set_filter("videos")
+    page.table.item(0, 0).setCheckState(Qt.Checked)
+    page._remove_selected()
+    assert page._files == []
+
+    # The extension is told to forget what the user just handled.
+    with context.session_factory() as session:
+        from magnetoclip.database.models import BrowserRequest
+
+        handled = session.query(BrowserRequest).all()
+    assert any(
+        request.type == "detections_handled"
+        and (request.payload_json or {}).get("urls") == ["https://example.com/a.mp4"]
+        for request in handled
+    )
+
+
+def test_open_detected_with_category_applies_the_filter(qtbot, context):
+    from magnetoclip.core.events.bus import Events
+    from magnetoclip.database.repositories import BrowserDetectionRepository
+
+    with context.session_factory() as session:
+        BrowserDetectionRepository(session).add(
+            "https://example.com/page",
+            count=2,
+            files=[
+                {"url": "https://example.com/a.mp4", "filename": "a.mp4", "category": "videos"},
+                {"url": "https://example.com/b.zip", "filename": "b.zip", "category": "compressed"},
+            ],
+        )
+
+    window = MainWindow(context)
+    qtbot.addWidget(window)
+
+    window._open_detected("compressed")
+    page = window._pages["Detected"]
+    assert [f["filename"] for f in page._files] == ["b.zip"]
+
+    # The tray hook calls it with no arguments and must not raise.
+    window._open_detected()
+    assert page._category == ""
+
+    # The event the watcher posts when the host answers the extension.
+    context.events.post(Events.NAVIGATE, {"page": "detected", "category": "videos"})
+    assert [f["filename"] for f in page._files] == ["a.mp4"]
+
+
 def test_detected_page_empty_state(qtbot, context):
     window = MainWindow(context)
     qtbot.addWidget(window)
@@ -928,21 +1300,6 @@ def test_torrents_page_placeholder_does_not_desync_rows(qtbot, context):
     page._on_removed({"id": 1})
     assert page.table.rowCount() == 1
     assert page._empty_row == 0
-
-
-def test_torrents_page_lists_site_links(qtbot, context):
-    from magnetoclip.ui.pages.torrents import TorrentsPage
-
-    page = TorrentsPage(context)
-    qtbot.addWidget(page)
-
-    urls = [entry[1] for entry in page._sites]
-    assert urls == [
-        "https://web.yts.gg/",
-        "https://en.eztv-official.is/",
-        "https://thepiratebay.org/",
-        "https://www.1377x.to/",
-    ]
 
 
 def test_notifier_prefers_toast_with_tray_fallback(qtbot, context, monkeypatch):

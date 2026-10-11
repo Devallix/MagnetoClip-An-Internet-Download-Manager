@@ -11,7 +11,11 @@ import pytest
 
 from magnetoclip.app.lifecycle import build_context
 from magnetoclip.browser.integration.install import host_manifest_path
-from magnetoclip.browser.service import BrowserIntegrationService, _expand_env
+from magnetoclip.browser.service import (
+    BACKGROUND_SHARED_SCRIPTS,
+    BrowserIntegrationService,
+    _expand_env,
+)
 from magnetoclip.resources import resource_path
 
 
@@ -99,8 +103,31 @@ def test_install_extension_copies_with_key(tmp_path):
     assert (extension_dir / "background.js").exists()
     manifest = json.loads((extension_dir / "manifest.json").read_text(encoding="utf-8"))
     assert len(manifest["key"]) > 0
+    assert manifest["background"]["service_worker"] == "background.js"
+    assert "scripts" not in manifest["background"]
+    assert "browser_specific_settings" not in manifest
     assert len(service.extension_id()) == 32
     assert service.status()["extension_ready"] is True
+    asyncio.run(context.shutdown())
+
+
+def test_install_extension_prepares_firefox_variant(tmp_path):
+    context = make_context(tmp_path)
+    service = BrowserIntegrationService(context)
+    service.install_extension()
+    firefox_dir = service.extension_dir_firefox()
+    assert (firefox_dir / "manifest.json").exists()
+    assert (firefox_dir / "background.js").exists()
+    manifest = json.loads((firefox_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["background"]["scripts"] == list(BACKGROUND_SHARED_SCRIPTS) + [
+        "background.js"
+    ]
+    assert "service_worker" not in manifest["background"]
+    assert "key" not in manifest
+    assert manifest["browser_specific_settings"]["gecko"]["id"].endswith("magnetoclip.app")
+    status = service.status()
+    assert status["extension_firefox_ready"] is True
+    assert status["extension_dir_firefox"].endswith("browser_extension_firefox")
     asyncio.run(context.shutdown())
 
 

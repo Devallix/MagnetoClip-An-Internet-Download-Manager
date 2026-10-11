@@ -28,8 +28,15 @@ def build_context(
     data_dir: Path | None = None,
     log_dir: Path | None = None,
     log_level: str = "INFO",
+    events: EventBus | None = None,
 ) -> AppContext:
-    """Create the application context: paths, logging, database, settings, events."""
+    """Create the application context: paths, logging, database, settings, events.
+
+    Pass a pre-built ``events`` to keep the event bus on the UI thread when
+    ``build_context`` itself runs on a helper thread (see ``_build_context_animated``).
+    A QObject created on a foreign Python thread gets stranded on that thread's own
+    (never-pumped) Qt event loop, so every queued signal emission is silently lost.
+    """
     config_dir = config_dir or default_config_dir()
     data_dir = data_dir or default_data_dir()
     log_dir = log_dir or default_log_dir()
@@ -44,7 +51,7 @@ def build_context(
     settings = Settings.from_store(store.load_all())
     settings.set("advanced.log_level", log_level.lower())
 
-    events = EventBus()
+    events = events or EventBus()
 
     context = AppContext(
         settings=settings,
@@ -67,6 +74,18 @@ def build_context(
     from magnetoclip.core.pause.manager import PauseController
 
     context.pauses = PauseController(context)
+
+    # Create the libtorrent session once and share it with the DownloadManager
+    # (built below). Two sessions would compete for the same listen port and
+    # split the DHT/peer pool, badly hurting throughput and incoming peers.
+    from magnetoclip.torrent import client as torrent
+
+    if torrent.available():
+        try:
+            cfg = torrent.ClientConfig.from_settings(settings)
+            context.torrent_client = torrent.TorrentClient(cfg)
+        except Exception:
+            context.torrent_client = None
 
     manager = DownloadManager(context)
     context.manager = manager
@@ -92,22 +111,6 @@ def build_context(
     from magnetoclip.browser.service import BrowserIntegrationService
 
     context.browser = BrowserIntegrationService(context)
-
-    from magnetoclip.torrent.client import ClientConfig, TorrentClient, available as torrent_available
-
-    if torrent_available():
-        try:
-            cfg = ClientConfig(
-                listen_port=int(settings.get("torrent.listen_port", 6881)),
-                enable_dht=bool(settings.get("torrent.enable_dht", True)),
-                enable_pex=bool(settings.get("torrent.enable_pex", True)),
-                enable_encryption=bool(settings.get("torrent.enable_encryption", True)),
-                max_connections=int(settings.get("torrent.max_connections", 200)),
-                max_uploads=int(settings.get("torrent.max_uploads", 4)),
-            )
-            context.torrent_client = TorrentClient(cfg)
-        except Exception:
-            context.torrent_client = None
 
     return context
 

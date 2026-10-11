@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -17,6 +18,7 @@ if sys.platform == "win32":
         pass
 
 import qasync
+from PySide6.QtCore import QEventLoop
 from PySide6.QtWidgets import QApplication, QMessageBox
 from magnetoclip.app.lifecycle import acquire_single_instance_lock, build_context
 from magnetoclip.browser.manager import BrowserManager
@@ -31,6 +33,11 @@ log = get_logger(__name__)
 
 BROWSER_HOST_FLAG = "--browser-host"
 _IPC_SERVER_NAME = "magnetoclip-ipc"
+
+# Floor on how long the splash stays up, so it is readable rather than a flash.
+# Startup work that runs longer than this keeps the splash up for its real
+# duration; nothing is ever added on top.
+SPLASH_MIN_MS = 900
 
 
 def _extract_magnet_uri(argv: list[str]) -> str | None:
@@ -49,6 +56,67 @@ def _extract_command_uri(argv: list[str]) -> str | None:
     return None
 
 
+def _pump_until(app, predicate, timeout: float = 120.0) -> None:
+    """Run the Qt event loop until *predicate* is true, or *timeout* elapses.
+
+    Keeps timers, repaints and input alive while worker-thread startup work is
+    in flight, which is what lets the splash actually animate.
+    """
+    deadline = time.monotonic() + timeout
+    while not predicate() and time.monotonic() < deadline:
+        app.processEvents(QEventLoop.AllEvents, 20)
+        time.sleep(0.005)
+    app.processEvents(QEventLoop.AllEvents, 20)
+
+
+def _build_context_animated(app):
+    """Build the app context on a worker thread while the UI stays responsive.
+
+    ``build_context`` only touches paths, logging, SQLite, settings and the
+    event bus -- no Qt widgets -- so it is safe off the UI thread. Doing it in
+    the foreground froze the splash for over a second with no visible motion.
+
+    The event bus is created here on the UI thread and handed into
+    ``build_context``: a QObject produced inside the helper thread would be
+    affiliated to that thread's own (unpumped) Qt event loop, silently dropping
+    every UI event posted later (navigation, notifications, download updates).
+    """
+    import threading
+
+    from magnetoclip.core.events.bus import EventBus
+
+    events = EventBus()
+    result: dict[str, object] = {}
+
+    def _work() -> None:
+        try:
+            result["context"] = build_context(events=events)
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller
+            result["error"] = exc
+
+    thread = threading.Thread(target=_work, name="magnetoclip-startup", daemon=True)
+    thread.start()
+    _pump_until(app, lambda: not thread.is_alive())
+    thread.join()
+    error = result.get("error")
+    if error is not None:
+        raise error
+    return result["context"]
+
+
+def _dismiss_splash(app, splash) -> None:
+    """Fade the splash out and let the fade finish before returning.
+
+    Needed on the early-exit paths, where the fade animation has to be given
+    event-loop time or the splash would be left stranded on screen.
+    """
+    splash.close_with_fade()
+    deadline = time.monotonic() + 0.5
+    while splash.isVisible() and time.monotonic() < deadline:
+        app.processEvents(QEventLoop.AllEvents, 20)
+        time.sleep(0.005)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     argv = list(sys.argv if argv is None else argv)
     if BROWSER_HOST_FLAG in argv:
@@ -61,7 +129,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     app.setWindowIcon(app_icon())
     app.setQuitOnLastWindowClosed(True)
 
-    context = build_context()
+    # Show the splash before any startup work so the wait is covered by
+    # something moving. Everything below either runs on a worker thread or is
+    # quick enough not to matter.
+    splash = SplashScreen()
+    splash.show()
+    splash_shown_at = time.monotonic()
+
+    context = _build_context_animated(app)
     log.info("application_starting", version=__version__)
 
     if context.settings.get("torrent.file_association", False):
@@ -90,6 +165,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         torrent_file = _find_torrent_arg(argv)
         command_uri = _extract_command_uri(argv)
         payload = magnet_uri or torrent_file or command_uri
+        _dismiss_splash(app, splash)
         if payload and _forward_to_running_instance(payload):
             log.info("forwarded_to_running_instance", payload=payload[:80])
             return 0
@@ -105,12 +181,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     ensure_trial_started(context.settings, context.session_factory)
     if not run_activation_gate(context):
         log.info("license_gate_aborted")
+        _dismiss_splash(app, splash)
         lock.unlock()
         return 1
 
     loop = qasync.QEventLoop(app)
     asyncio.set_event_loop(loop)
 
+    # MainWindow is built here rather than behind the splash deliberately: it
+    # touches widgets, so it has to stay on the UI thread. It is only a few
+    # hundred milliseconds now that pages are built lazily.
     window = MainWindow(context)
 
     # Listen for forwarded magnet/.torrent payloads right away so clicks
@@ -128,12 +208,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             log.warning("browser_integration_ensure_failed", exc_info=True)
 
     async def _run_until_close() -> None:
-        splash = SplashScreen()
-        splash.show()
-        app.processEvents()
-
         import asyncio as _asyncio
-        await _asyncio.sleep(4)
+
+        # Wait out only the remainder of a short minimum. The old fixed sleep
+        # added several seconds of dead time even when startup had already
+        # finished, and the heavy work it was meant to cover had already
+        # finished before the splash was even shown.
+        remaining = SPLASH_MIN_MS / 1000.0 - (time.monotonic() - splash_shown_at)
+        if remaining > 0:
+            await _asyncio.sleep(remaining)
 
         splash.close_with_fade()
         window.show()

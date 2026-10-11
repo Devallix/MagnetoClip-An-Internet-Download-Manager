@@ -33,12 +33,35 @@ class FakeWindow:
         self.detected.append(True)
 
 
+class FilterableWindow(FakeWindow):
+    """A window whose hook accepts the detection category (the real signature)."""
+
+    def _open_detected(self, category=None):
+        self.detected.append(category or "")
+
+
 @pytest.mark.parametrize(
     ("uri", "expected"),
     [
         ("magneto://open", {"action": "open"}),
         ("magneto://open-downloads", {"action": "open-downloads"}),
-        ("magneto://open-detected", {"action": "open-detected"}),
+        ("magneto://open-detected", {"action": "open-detected", "category": ""}),
+        (
+            "magneto://open-detected?category=videos",
+            {"action": "open-detected", "category": "videos"},
+        ),
+        (
+            "magneto://open-detected?category=VIDEO",
+            {"action": "open-detected", "category": "videos"},
+        ),
+        (
+            "magneto://open-detected?category=audio",
+            {"action": "open-detected", "category": "audio"},
+        ),
+        (
+            "magneto://open-detected?category=bogus",
+            {"action": "open-detected", "category": ""},
+        ),
         ("magneto://reveal?download=7", {"action": "reveal", "download_id": 7}),
         ("magneto://reveal?download=abc", {"action": "reveal", "download_id": None}),
         ("magneto://reveal", {"action": "reveal", "download_id": None}),
@@ -68,9 +91,42 @@ def test_build_launch_uri(kind, download_id, action, expected):
     assert build_launch_uri(kind, download_id, action) == expected
 
 
+def test_build_launch_uri_detected_with_category():
+    assert (
+        build_launch_uri("info", None, "detected", "videos")
+        == "magneto://open-detected?category=videos"
+    )
+    # "other" is a real filter, so it stays a filter; only unknown values fall
+    # back to the unfiltered page.
+    assert (
+        build_launch_uri("info", None, "detected", "other")
+        == "magneto://open-detected?category=other"
+    )
+    assert build_launch_uri("info", None, "detected", "bogus") == "magneto://open-detected"
+    assert build_launch_uri("info", None, "detected", None) == "magneto://open-detected"
+
+
 def test_apply_command_open_detected_uses_window_hook():
     window = FakeWindow()
     assert apply_command(window, "magneto://open-detected") is True
+    assert window.detected == [True]
+
+
+def test_apply_command_open_detected_passes_category():
+    window = FilterableWindow()
+    assert apply_command(window, "magneto://open-detected?category=compressed") is True
+    assert window.detected == ["compressed"]
+
+
+def test_apply_command_open_detected_without_category_means_all():
+    window = FilterableWindow()
+    assert apply_command(window, "magneto://open-detected") is True
+    assert window.detected == [""]
+
+
+def test_apply_command_open_detected_category_on_legacy_hook():
+    window = FakeWindow()
+    assert apply_command(window, "magneto://open-detected?category=audio") is True
     assert window.detected == [True]
 
 

@@ -3,6 +3,7 @@ import json
 from magnetoclip.engine.resume.mclip import (
     MClipState,
     SegmentState,
+    reconcile_inplace,
     reconcile_part_sizes,
 )
 
@@ -68,3 +69,22 @@ def test_save_and_load(tmp_path):
     loaded = MClipState.load(MClipState.sidecar_for(state.file_path))
     assert loaded.file_path == state.file_path
     assert len(loaded.segments) == 2
+
+
+def test_reconcile_inplace_clamps_overshoot():
+    state = _state()
+    state.segments[0].written = 999  # overshoots its 50-byte range
+    reconcile_inplace(state)
+    assert state.segments[0].written == 50
+    assert state.segments[0].complete
+    assert state.segments[0].status == "completed"
+    # The partially downloaded segment is left untouched.
+    assert state.segments[1].written == 20
+
+
+def test_reconcile_inplace_leaves_open_ended_segment():
+    state = _state()
+    state.segments = [SegmentState(index=0, start=0, end=None, written=123)]
+    reconcile_inplace(state)
+    assert state.segments[0].written == 123
+    assert not state.segments[0].complete

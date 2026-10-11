@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Callable
-
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFrame,
@@ -11,11 +9,10 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QVBoxLayout,
-    QWidget,
 )
 
 from ..util import format_bytes, format_eta, format_speed, fraction
-from .progress import StyledProgressBar
+from .liquid_progress import LiquidProgressBar
 
 BADGE_LABELS = {
     "queued": "Queued",
@@ -79,7 +76,8 @@ class DownloadCard(QFrame):
 
         layout.addLayout(top)
 
-        self.progress = StyledProgressBar()
+        self.progress = LiquidProgressBar()
+        self.progress.setFixedHeight(8)
         layout.addWidget(self.progress)
 
         bottom = QHBoxLayout()
@@ -162,7 +160,14 @@ class DownloadCard(QFrame):
         downloaded = snapshot.get("size_downloaded") or 0
         total = snapshot.get("size_total")
         speed = snapshot.get("speed")
-        self.progress.set_state(status if status in ("completed", "failed", "paused") else "idle")
+        if status == "paused":
+            self.progress.set_state("paused")
+        elif status == "completed":
+            self.progress.set_state("completed")
+        elif status in ("failed", "verification_failed"):
+            self.progress.set_state("failed")
+        else:
+            self.progress.set_state("downloading")
         if total:
             self.progress.set_fraction(fraction(downloaded, total))
             self.size_label.setText(f"{format_bytes(downloaded)} / {format_bytes(total)}")

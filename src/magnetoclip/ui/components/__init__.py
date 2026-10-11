@@ -9,17 +9,19 @@ from .buttons import (
     GhostButton,
     IconToolButton,
 )
+from .color_header import ColorHeaderView
 from .download_card import DownloadCard
 from .progress import StyledProgressBar
 from .stat_card import StatCard
 
 __all__ = [
     "AccentButton",
-    "DangerButton",
-    "GhostButton",
     "CategoryButton",
-    "IconToolButton",
+    "ColorHeaderView",
+    "DangerButton",
     "DownloadCard",
-    "StyledProgressBar",
+    "GhostButton",
+    "IconToolButton",
     "StatCard",
+    "StyledProgressBar",
 ]

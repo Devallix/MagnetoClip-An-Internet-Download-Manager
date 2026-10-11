@@ -27,6 +27,7 @@ class Notifier:
         self.context = context
         self._tray = tray
         self._toast_enabled = toast_enabled
+        self._app_toast_handler = None
         self._disconnect = context.events.connect(
             Events.NOTIFICATION_REQUESTED, self._on_notification
         )
@@ -34,6 +35,15 @@ class Notifier:
     def enable_toasts(self) -> None:
         """Prefer native Windows toasts over tray balloons from now on."""
         self._toast_enabled = True
+
+    def set_app_toast_handler(self, handler) -> None:
+        """Let the in-app desktop toast own completion notifications.
+
+        When ``handler()`` returns True a ``completed`` event is reported by
+        the app's own overlay toast, so no native Windows toast is posted for
+        it (avoids two competing notifications).
+        """
+        self._app_toast_handler = handler
 
     def attach_tray(self, tray) -> None:
         self._tray = tray
@@ -49,11 +59,21 @@ class Notifier:
         kind = payload.get("kind")
         download_id = payload.get("download_id")
         action = payload.get("action")
-        log.info("notification", kind=kind, title=title)
+        category = payload.get("category")
+        log.info("notification kind=%s title=%s", kind, title)
         if kind == "completed":
             self._play_completion_sound()
+            handler = self._app_toast_handler
+            if handler is not None:
+                try:
+                    if handler():
+                        # The app's own toast is showing and owns the visual;
+                        # do not stack a native Windows toast on top of it.
+                        return
+                except Exception:  # noqa: BLE001 - fall back to native toast
+                    log.exception("app_toast_handler_failed")
         if self._toast_enabled and sys.platform == "win32":
-            launch = build_launch_uri(kind, download_id, action)
+            launch = build_launch_uri(kind, download_id, action, category)
             try:
                 if win_toast.show_toast(title, body, launch=launch):
                     return

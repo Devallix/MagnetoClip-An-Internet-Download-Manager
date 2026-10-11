@@ -30,7 +30,6 @@ from ..components.buttons import AccentButton
 from ..dialogs.proxy import ProxyDialog
 from .base import Page, make_scrollable
 
-
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 
@@ -191,6 +190,9 @@ class SettingsPage(Page):
         self.retry_spin = _spin(0, 20)
         grid.addWidget(self.retry_spin, 2, 1)
 
+        self.inplace_check = _check("Write in place (skip post-download merge)")
+        grid.addWidget(self.inplace_check, 2, 2, 1, 3)
+
         cl.addLayout(grid)
 
         form = QFormLayout()
@@ -315,6 +317,32 @@ class SettingsPage(Page):
         quality_row.addStretch(1)
         cl.addLayout(quality_row)
 
+        yt_quality_row = QHBoxLayout()
+        yt_quality_row.setSpacing(8)
+        yt_quality_row.addWidget(QLabel("YouTube quality"))
+        self.youtube_quality_combo = QComboBox()
+        self.youtube_quality_combo.setFixedWidth(120)
+        self.youtube_quality_combo.addItem("Ask each time", "ask")
+        self.youtube_quality_combo.addItem("Best Available", "best")
+        self.youtube_quality_combo.addItem("2160p (4K)", "2160")
+        self.youtube_quality_combo.addItem("1440p", "1440")
+        self.youtube_quality_combo.addItem("1080p", "1080")
+        self.youtube_quality_combo.addItem("720p", "720")
+        self.youtube_quality_combo.addItem("480p", "480")
+        self.youtube_quality_combo.addItem("360p", "360")
+        yt_quality_row.addWidget(self.youtube_quality_combo)
+        yt_quality_row.addStretch(1)
+        cl.addLayout(yt_quality_row)
+
+        ffmpeg_row = QHBoxLayout()
+        ffmpeg_row.setSpacing(8)
+        ffmpeg_row.addWidget(QLabel("FFmpeg folder"))
+        self.ffmpeg_path_edit = QLineEdit()
+        self.ffmpeg_path_edit.setPlaceholderText("Auto-detect (bundled / PATH)")
+        ffmpeg_row.addWidget(self.ffmpeg_path_edit, 1)
+        ffmpeg_row.addWidget(_browse_btn(self._browse_ffmpeg_dir, "Choose FFmpeg folder"))
+        cl.addLayout(ffmpeg_row)
+
         layout.addWidget(card)
 
         # ── section: Torrents ────────────────────────────────────────────────
@@ -348,6 +376,56 @@ class SettingsPage(Page):
         grid.addWidget(QLabel("Max upload slots"), row, 2)
         self.torrent_max_uploads_spin = _spin(1, 100)
         grid.addWidget(self.torrent_max_uploads_spin, row, 3)
+        row += 1
+
+        grid.addWidget(QLabel("Speed limits"), row, 0, 1, 2)
+        grid.addWidget(QLabel("Max download"), row, 2)
+        self.torrent_max_download_spin = _spin(0, 1000000, "KB/s")
+        self.torrent_max_download_spin.setToolTip("0 = unlimited")
+        grid.addWidget(self.torrent_max_download_spin, row, 3)
+        row += 1
+
+        grid.addWidget(QLabel("Max upload"), row, 2)
+        self.torrent_max_upload_spin = _spin(0, 1000000, "KB/s")
+        self.torrent_max_upload_spin.setToolTip("0 = unlimited")
+        grid.addWidget(self.torrent_max_upload_spin, row, 3)
+        row += 1
+
+        grid.addWidget(QLabel("Connections per torrent"), row, 2)
+        self.torrent_connections_per_torrent_spin = _spin(0, 1000)
+        self.torrent_connections_per_torrent_spin.setToolTip(
+            "Peer connections allowed per torrent; 0 uses the global limit"
+        )
+        grid.addWidget(self.torrent_connections_per_torrent_spin, row, 3)
+        row += 1
+
+        self.torrent_prefer_tcp_check = _check("Prefer TCP over uTP")
+        self.torrent_prefer_tcp_check.setToolTip(
+            "Favour TCP peers for higher throughput; uTP stays available"
+        )
+        grid.addWidget(self.torrent_prefer_tcp_check, row, 0, 1, 2)
+        grid.addWidget(QLabel("Disk cache"), row, 2)
+        self.torrent_disk_cache_spin = _spin(16, 4096, "MiB")
+        self.torrent_disk_cache_spin.setToolTip(
+            "In-memory disk cache; larger smooths high-speed downloads"
+        )
+        grid.addWidget(self.torrent_disk_cache_spin, row, 3)
+        row += 1
+
+        grid.addWidget(QLabel("Hashing threads"), row, 2)
+        self.torrent_hashing_threads_spin = _spin(1, 32)
+        self.torrent_hashing_threads_spin.setToolTip(
+            "Threads used to hash finished pieces while the download continues"
+        )
+        grid.addWidget(self.torrent_hashing_threads_spin, row, 3)
+        row += 1
+
+        grid.addWidget(QLabel("Request queue"), row, 2)
+        self.torrent_request_queue_spin = _spin(100, 10000)
+        self.torrent_request_queue_spin.setToolTip(
+            "Outstanding block requests per peer; higher helps high-latency links"
+        )
+        grid.addWidget(self.torrent_request_queue_spin, row, 3)
         row += 1
 
         grid.addWidget(QLabel("Queue"), row, 0, 1, 2)
@@ -566,11 +644,12 @@ class SettingsPage(Page):
     def _load_values(self) -> None:
         s = self.context.settings
         self.simultaneous_spin.setValue(int(s.get("downloads.simultaneous", 3)))
-        self.connections_spin.setValue(int(s.get("downloads.connections_per_download", 8)))
+        self.connections_spin.setValue(int(s.get("downloads.connections_per_download", 16)))
         self.bandwidth_spin.setValue(float(s.get("network.max_bandwidth_mbps", 0.0) or 0.0))
         self.user_agent_edit.setText(str(s.get("network.user_agent", "")))
         self.timeout_spin.setValue(int(s.get("network.timeout_seconds", 30)))
         self.retry_spin.setValue(int(s.get("network.retry_max", 5)))
+        self.inplace_check.setChecked(bool(s.get("downloads.inplace_downloads", True)))
         self.verify_tls_check.setChecked(bool(s.get("network.verify_tls", True)))
         self.dedup_enabled_check.setChecked(bool(s.get("dedup.enabled", True)))
         self.dedup_auto_skip_check.setChecked(bool(s.get("dedup.auto_skip", False)))
@@ -606,13 +685,39 @@ class SettingsPage(Page):
         )
         index = self.streaming_quality_combo.findData(str(s.get("streaming.quality", "best")))
         self.streaming_quality_combo.setCurrentIndex(max(0, index))
+        yt_index = self.youtube_quality_combo.findData(
+            str(s.get("youtube.default_quality", "ask"))
+        )
+        self.youtube_quality_combo.setCurrentIndex(max(0, yt_index))
+        self.ffmpeg_path_edit.setText(str(s.get("streaming.ffmpeg_path", "")))
 
         self.torrent_enable_dht_check.setChecked(bool(s.get("torrent.enable_dht", True)))
         self.torrent_enable_pex_check.setChecked(bool(s.get("torrent.enable_pex", True)))
         self.torrent_enable_encryption_check.setChecked(bool(s.get("torrent.enable_encryption", True)))
         self.torrent_listen_port_spin.setValue(int(s.get("torrent.listen_port", 6881)))
-        self.torrent_max_connections_spin.setValue(int(s.get("torrent.max_connections", 200)))
+        self.torrent_max_connections_spin.setValue(int(s.get("torrent.max_connections", 500)))
         self.torrent_max_uploads_spin.setValue(int(s.get("torrent.max_uploads", 4)))
+        self.torrent_max_download_spin.setValue(
+            int(s.get("torrent.max_download_speed", 0))
+        )
+        self.torrent_max_upload_spin.setValue(
+            int(s.get("torrent.max_upload_speed", 0))
+        )
+        self.torrent_connections_per_torrent_spin.setValue(
+            int(s.get("torrent.connections_per_torrent", 0))
+        )
+        self.torrent_disk_cache_spin.setValue(
+            int(s.get("torrent.disk_cache_mb", 256))
+        )
+        self.torrent_hashing_threads_spin.setValue(
+            int(s.get("torrent.hashing_threads", 4))
+        )
+        self.torrent_request_queue_spin.setValue(
+            int(s.get("torrent.max_out_request_queue", 1500))
+        )
+        self.torrent_prefer_tcp_check.setChecked(
+            bool(s.get("torrent.prefer_tcp", True))
+        )
         self.torrent_max_active_torrents_spin.setValue(
             int(s.get("torrent.max_active_torrents", 5))
         )
@@ -743,6 +848,13 @@ class SettingsPage(Page):
         directory = QFileDialog.getExistingDirectory(self, "Default torrent save folder")
         if directory:
             self.torrent_save_dir_edit.setText(directory)
+
+    def _browse_ffmpeg_dir(self) -> None:
+        directory = QFileDialog.getExistingDirectory(
+            self, "Folder containing ffmpeg/ffprobe"
+        )
+        if directory:
+            self.ffmpeg_path_edit.setText(directory)
 
     def _load_proxy_combo(self) -> None:
         self.proxy_combo.clear()
@@ -1044,8 +1156,8 @@ class SettingsPage(Page):
         self._license_worker.start()
 
     def _on_license_deactivated(self, serial: str, exc: Exception | None) -> None:
-        from magnetoclip.services.licensing.state import clear_serial
         from magnetoclip.services.licensing.client import NotBound
+        from magnetoclip.services.licensing.state import clear_serial
 
         if isinstance(exc, NotBound):
             clear_serial()
@@ -1081,6 +1193,7 @@ class SettingsPage(Page):
         s = self.context.settings
         s.set("downloads.simultaneous", self.simultaneous_spin.value())
         s.set("downloads.connections_per_download", self.connections_spin.value())
+        s.set("downloads.inplace_downloads", self.inplace_check.isChecked())
         s.set("network.max_bandwidth_mbps", self.bandwidth_spin.value())
         s.set("network.user_agent", self.user_agent_edit.text())
         s.set("network.timeout_seconds", self.timeout_spin.value())
@@ -1121,6 +1234,11 @@ class SettingsPage(Page):
             "streaming.quality",
             self.streaming_quality_combo.currentData() or "best",
         )
+        s.set(
+            "youtube.default_quality",
+            self.youtube_quality_combo.currentData() or "ask",
+        )
+        s.set("streaming.ffmpeg_path", self.ffmpeg_path_edit.text().strip())
 
         s.set("torrent.enable_dht", self.torrent_enable_dht_check.isChecked())
         s.set("torrent.enable_pex", self.torrent_enable_pex_check.isChecked())
@@ -1128,6 +1246,19 @@ class SettingsPage(Page):
         s.set("torrent.listen_port", self.torrent_listen_port_spin.value())
         s.set("torrent.max_connections", self.torrent_max_connections_spin.value())
         s.set("torrent.max_uploads", self.torrent_max_uploads_spin.value())
+        s.set("torrent.max_download_speed", self.torrent_max_download_spin.value())
+        s.set("torrent.max_upload_speed", self.torrent_max_upload_spin.value())
+        s.set(
+            "torrent.connections_per_torrent",
+            self.torrent_connections_per_torrent_spin.value(),
+        )
+        s.set("torrent.disk_cache_mb", self.torrent_disk_cache_spin.value())
+        s.set("torrent.hashing_threads", self.torrent_hashing_threads_spin.value())
+        s.set(
+            "torrent.max_out_request_queue",
+            self.torrent_request_queue_spin.value(),
+        )
+        s.set("torrent.prefer_tcp", self.torrent_prefer_tcp_check.isChecked())
         s.set(
             "torrent.max_active_torrents",
             self.torrent_max_active_torrents_spin.value(),

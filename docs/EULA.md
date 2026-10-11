@@ -20,9 +20,12 @@ use the Software.
 documentation, and any updates, upgrades, patches, or modified versions that
 Devallix may provide to you.
 
-**1.2.** The Software is an advanced download manager that captures web
-content — including files, videos, music, and documents — and organizes
-downloaded items into automatically sorted categories.
+**1.2.** The Software is a general-purpose tool that downloads web content —
+including files, videos, music, and documents — and organizes downloaded items
+into automatically sorted categories. The Software is not affiliated with,
+endorsed by, or designed for use with any particular website, web service, or
+content provider. It works with websites and content you choose to access, and
+it does not host, publish, or distribute any content itself.
 
 ## 2. Grant of License
 
@@ -82,6 +85,14 @@ otherwise made available to you. To the extent of any conflict between this
 Agreement and the license terms of a Third-Party Component, the license terms
 of the Third-Party Component will govern with respect to that component.
 
+**4.2. Bundled FFmpeg.** The Software includes a copy of FFmpeg, used to
+generate video previews for formats your system cannot decode directly. That
+copy is distributed under the GNU Lesser General Public License, version 2.1
+or later, and is invoked as a separate program; it is not linked into the
+Software. You may replace or remove it and point the Software at a different
+FFmpeg installation via the application's settings. Its license text is
+included with the Software as `FFMPEG_LICENSE.md`.
+
 ## 5. User Obligations and Acceptable Use
 
 **5.1.** You agree to use the Software only in accordance with this Agreement,
@@ -93,7 +104,9 @@ Software and for any consequences arising from such activity.
 trademarks, privacy rights, or other intellectual property or proprietary
 rights of any person or entity. Downloading or distributing copyrighted
 content without authorization may violate applicable law and expose you to
-civil and criminal liability.
+civil and criminal liability. The Software does not provide, recommend, or
+direct you to any particular source of content; you alone decide what content
+to download and are solely responsible for doing so lawfully.
 
 ## 6. Intellectual Property
 

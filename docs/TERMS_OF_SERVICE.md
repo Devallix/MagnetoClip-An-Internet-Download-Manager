@@ -23,7 +23,9 @@ between these Terms and the EULA, the EULA governs your use of the Software.
 **1.1.** The Service provides download-management technology: a Windows desktop
 application that captures files, videos, music, documents, and torrents from
 the web, together with a companion browser extension, remote-dashboard access,
-and the informational MagnetoClip website.
+and the informational MagnetoClip website. The Software is a general-purpose
+tool and is not affiliated with, endorsed by, or targeted at any particular
+website, web service, or content provider.
 
 **1.2.** We may change, suspend, or discontinue any part of the Service at any
 time, with or without notice, and we are not liable to you for any such change.
@@ -103,7 +105,9 @@ terms, which are provided with the Software or otherwise made available.
 **5.2.** The Service may interact with third-party services you choose to use,
 including streaming websites, torrent trackers and peers, proxy servers, and
 update servers. Your use of such third-party services is governed by those
-services' own terms and policies, and we are not responsible for them.
+services' own terms and policies, and we are not responsible for them. We do
+not endorse, control, or take responsibility for any third-party website,
+content, or service you access through the Software.
 
 ## 6. Privacy
 

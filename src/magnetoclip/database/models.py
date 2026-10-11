@@ -15,6 +15,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -94,11 +95,32 @@ class Download(Base):
     hash_calculated: Mapped[Optional[str]] = mapped_column(String(128))
     detected_type: Mapped[Optional[str]] = mapped_column(String(64))
     media_metadata_json: Mapped[Optional[dict]] = mapped_column(JSON)
+    stream_context_json: Mapped[Optional[dict]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     error: Mapped[Optional[str]] = mapped_column(Text)
+    error_code: Mapped[Optional[str]] = mapped_column(String(64))
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Playlist grouping columns (``None`` for standalone downloads)
+    playlist_id: Mapped[Optional[str]] = mapped_column(String(128), index=True)
+    playlist_title: Mapped[Optional[str]] = mapped_column(String(1024))
+    playlist_item_index: Mapped[Optional[int]] = mapped_column(Integer)
+
+    # YouTube per-download quality (selected before download, filled after)
+    youtube_quality: Mapped[Optional[str]] = mapped_column(String(32))
+    youtube_height: Mapped[Optional[int]] = mapped_column(Integer)
+    youtube_width: Mapped[Optional[int]] = mapped_column(Integer)
+    youtube_fps: Mapped[Optional[int]] = mapped_column(Integer)
+    youtube_format: Mapped[Optional[str]] = mapped_column(String(128))
+    youtube_format_selector: Mapped[Optional[str]] = mapped_column(String(512))
+    youtube_merge_output_format: Mapped[Optional[str]] = mapped_column(String(32))
+    youtube_format_label: Mapped[Optional[str]] = mapped_column(String(256))
+    youtube_requested_quality: Mapped[Optional[str]] = mapped_column(String(64))
+    actual_width: Mapped[Optional[int]] = mapped_column(Integer)
+    actual_height: Mapped[Optional[int]] = mapped_column(Integer)
+    actual_fps: Mapped[Optional[float]] = mapped_column(Float)
 
     # Torrent-specific columns
     torrent_info_hash: Mapped[Optional[str]] = mapped_column(String(40))
@@ -170,6 +192,62 @@ class VerifiedRun(Base):
     download: Mapped[Download] = relationship(back_populates="verified_runs")
 
 
+class Playlist(Base):
+    """A resolved YouTube playlist, kept so previews/history survive restarts.
+
+    The playlist row itself never moves bytes — each entry becomes its own
+    :class:`Download` row, linked back from :class:`PlaylistItem`. ``playlist_id``
+    is the YouTube ``list=`` value (unique key, like the download archive).
+    """
+
+    __tablename__ = "playlists"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    playlist_id: Mapped[str] = mapped_column(
+        String(128), unique=True, nullable=False, index=True
+    )
+    title: Mapped[Optional[str]] = mapped_column(String(1024))
+    url: Mapped[Optional[str]] = mapped_column(String(4096))
+    video_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now()
+    )
+
+    items: Mapped[list["PlaylistItem"]] = relationship(
+        back_populates="playlist", cascade="all, delete-orphan"
+    )
+
+
+class PlaylistItem(Base):
+    """One entry inside a :class:`Playlist`, tied to the download it became."""
+
+    __tablename__ = "playlist_items"
+    __table_args__ = (
+        UniqueConstraint("playlist_id", "video_id", name="uq_playlist_video"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    playlist_id: Mapped[int] = mapped_column(
+        ForeignKey("playlists.id"), nullable=False, index=True
+    )
+    video_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    title: Mapped[Optional[str]] = mapped_column(String(1024))
+    url: Mapped[Optional[str]] = mapped_column(String(4096))
+    index: Mapped[int] = mapped_column(Integer, default=0)
+    duration: Mapped[Optional[float]] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    error: Mapped[Optional[str]] = mapped_column(Text)
+    download_id: Mapped[Optional[int]] = mapped_column(ForeignKey("downloads.id"))
+    requested_quality: Mapped[Optional[str]] = mapped_column(String(64))
+    actual_quality: Mapped[Optional[str]] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now()
+    )
+
+    playlist: Mapped[Playlist] = relationship(back_populates="items")
+    download: Mapped[Optional[Download]] = relationship()
+
+
 class FileHash(Base):
     """An indexed digest of a downloaded file, used for duplicate detection.
 
@@ -214,9 +292,13 @@ class PendingCapture(Base):
     url: Mapped[str] = mapped_column(String(4096), nullable=False)
     filename: Mapped[Optional[str]] = mapped_column(String(1024))
     referrer: Mapped[Optional[str]] = mapped_column(String(4096))
+    user_agent: Mapped[Optional[str]] = mapped_column(String(512))
+    headers_json: Mapped[Optional[dict]] = mapped_column(JSON)
     source: Mapped[Optional[str]] = mapped_column(String(64))
     detected_type: Mapped[Optional[str]] = mapped_column(String(64))
     cookies_json: Mapped[Optional[dict]] = mapped_column(JSON)
+    page_url: Mapped[Optional[str]] = mapped_column(String(4096))
+    frame_url: Mapped[Optional[str]] = mapped_column(String(4096))
     data_base64: Mapped[Optional[str]] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(16), default="pending")
     download_id: Mapped[Optional[int]] = mapped_column(ForeignKey("downloads.id"))

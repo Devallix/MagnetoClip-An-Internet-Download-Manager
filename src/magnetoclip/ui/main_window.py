@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer
 from PySide6.QtGui import QPixmap, QResizeEvent
 from PySide6.QtWidgets import (
@@ -12,7 +14,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
-    QMenu,
     QScrollArea,
     QStackedWidget,
     QStatusBar,
@@ -29,6 +30,7 @@ from magnetoclip.version import __version__
 from .categories import CATEGORY_LABELS, CATEGORY_ORDER, snapshot_category
 from .components.buttons import CategoryButton, VerticalIconButton
 from .components.capture_watcher import CaptureWatcher
+from .components.completion_notifier import CompletionNotifier
 from .components.icons import category_icon, nav_icon, text_icon
 from .components.tray import SystemTray
 from .dialogs.about import show_about
@@ -36,6 +38,7 @@ from .pages import (
     AnalyticsPage,
     BrowserPage,
     DetectedPage,
+    DownloadSitesPage,
     DownloadsPage,
     OverviewPage,
     PausePage,
@@ -60,8 +63,44 @@ NAV_ITEMS = [
     ("pause", "Pause"),
     ("speedtest", "Speed"),
     ("browser", "Browser"),
+    ("sites", "Sites"),
     ("settings", "Settings"),
 ]
+
+
+class _LazyPageRegistry(dict):
+    """Maps a nav label to its page widget, constructing it on first access.
+
+    Behaves like the plain ``dict`` it replaces, so ``window._pages["Downloads"]``
+    keeps working whether or not that page has been visited yet.
+    """
+
+    def __init__(self, window) -> None:
+        super().__init__()
+        self._window = window
+
+    def _build(self, label: str) -> None:
+        builder = self._window._page_builders.get(label)
+        if builder is None:
+            return
+        page = builder()
+        self._window.stack.addWidget(page)
+        dict.__setitem__(self, label, page)
+
+    def __getitem__(self, label):
+        # Must consult the raw dict: __contains__ also reports buildable
+        # labels, so `label not in self` would never be true here.
+        if not dict.__contains__(self, label):
+            self._build(label)
+        return dict.__getitem__(self, label)
+
+    def get(self, label, default=None):
+        if not dict.__contains__(self, label):
+            self._build(label)
+        return dict.get(self, label, default)
+
+    def __contains__(self, label) -> bool:
+        return dict.__contains__(self, label) or label in self._window._page_builders
 
 
 class MainWindow(QMainWindow):
@@ -78,6 +117,13 @@ class MainWindow(QMainWindow):
         self._fit_to_work_area()
         self._speeds: dict[int, float] = {}
         self._active = 0
+        # Sidebar counters re-read all snapshots; coalesce bursts of download
+        # events (e.g. "Start all") so a bulk action doesn't re-scan the table
+        # once per download.
+        self._stats_timer = QTimer(self)
+        self._stats_timer.setSingleShot(True)
+        self._stats_timer.setInterval(400)
+        self._stats_timer.timeout.connect(self._refresh_stats)
 
         theme = context.settings.get("appearance.theme", "dark")
         apply_theme(self, theme=theme)
@@ -105,7 +151,6 @@ class MainWindow(QMainWindow):
         content_layout.setSpacing(0)
 
         self.stack = QStackedWidget()
-        self._pages: dict[str, QWidget] = {}
         self._build_pages(context)
         content_layout.addWidget(self.stack, 1)
         body.addWidget(content, 1)
@@ -144,6 +189,7 @@ class MainWindow(QMainWindow):
         events.connect(Events.DOWNLOAD_REMOVED, self._on_download_event)
         events.connect(Events.DOWNLOAD_UPDATED, self._on_download_event)
         events.connect(Events.UPDATE_AVAILABLE, self._on_update_available)
+        events.connect(Events.NAVIGATE, self._on_navigate)
 
         self.tray = SystemTray(context, parent=self)
         self.tray.set_open_callback(self.show)
@@ -158,6 +204,15 @@ class MainWindow(QMainWindow):
 
         self._capture_watcher = CaptureWatcher(context, parent=self)
         self._capture_watcher.start()
+
+        # In-window completion feedback: a desktop-level slide-in toast that is
+        # independent of the main window (it shows even when minimized or
+        # unfocused). Keep a reference so it is not garbage-collected.
+        self._completion_notifier = CompletionNotifier(context, parent=self)
+        if notifier is not None:
+            notifier.set_app_toast_handler(
+                self._completion_notifier.is_active
+            )
 
         self._activate("Downloads")
         self._refresh_stats()
@@ -225,6 +280,9 @@ class MainWindow(QMainWindow):
         # Override the torrents button icon with the "T" glyph
         if "torrents" in self._nav_buttons:
             self._nav_buttons["torrents"].setIcon(text_icon("T"))
+
+        if "sites" in self._nav_buttons:
+            self._nav_buttons["sites"].setToolTip("Download Sites")
 
         layout.addStretch(1)
         about = VerticalIconButton(nav_icon("about"), "About")
@@ -341,12 +399,15 @@ class MainWindow(QMainWindow):
             "Pause": lambda: PausePage(context),
             "Speed": lambda: SpeedTestPage(context),
             "Browser": lambda: BrowserPage(context),
+            "Sites": lambda: DownloadSitesPage(context),
             "Settings": lambda: SettingsPage(context),
         }
-        for key, label in NAV_ITEMS:
-            page = builders[label]()
-            self.stack.addWidget(page)
-            self._pages[label] = page
+        # Pages are built on first use, not up front. Each constructor loads
+        # its tables synchronously, and building all eleven cost seconds of
+        # frozen UI during startup. ``_pages`` keeps building on access so
+        # existing ``window._pages["Downloads"]`` call sites still work.
+        self._page_builders = builders
+        self._pages = _LazyPageRegistry(self)
 
     # ----- sidebar collapse -----
 
@@ -392,7 +453,7 @@ class MainWindow(QMainWindow):
         effect = QGraphicsOpacityEffect(widget)
         widget.setGraphicsEffect(effect)
         animation = QPropertyAnimation(effect, b"opacity", self)
-        animation.setDuration(180)
+        animation.setDuration(120)
         animation.setStartValue(0.0)
         animation.setEndValue(1.0)
         animation.setEasingCurve(QEasingCurve.OutCubic)
@@ -402,15 +463,45 @@ class MainWindow(QMainWindow):
 
     # ----- navigation -----
 
-    def _open_detected(self) -> None:
-        """Handle a tray notification click for detected files."""
+    def _open_detected(self, category: str | None = None) -> None:
+        """Handle a tray notification, shell URI or extension request.
+
+        *category* is one of the extension's six detection categories; ``None``
+        (or an empty value) shows every category.
+        """
         self.show()
         self.raise_()
         self.activateWindow()
         self._activate_nav("detected")
+        page = self._pages.get("Detected")
+        setter = getattr(page, "set_filter", None)
+        if setter is not None:
+            setter(category)
         watcher = getattr(self, "_capture_watcher", None)
         if watcher is not None:
             watcher.poll()
+
+    def _on_navigate(self, payload: Any) -> None:
+        """Navigate in response to a ``NAVIGATE`` event (extension, shell, tray)."""
+        if not isinstance(payload, dict):
+            return
+        page = str(payload.get("page") or "")
+        if not page:
+            return
+        key = self._key_for_label(page)
+        if key == "overview" and page.lower() != "overview":
+            key = page.lower()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self._activate_nav(key)
+        category = payload.get("category")
+        if category is not None:
+            widget = self._pages.get(self._label_for_key(key))
+            setter = getattr(widget, "set_filter", None)
+            if setter is not None:
+                setter(category)
+
 
     def _activate(self, name: str) -> None:
         """Activate a page by nav name (public surface used by tests)."""
@@ -435,11 +526,13 @@ class MainWindow(QMainWindow):
             if isinstance(page, DownloadsPage):
                 page.set_filter("all")
 
-        self.stack.setCurrentWidget(self._pages[self._label_for_key(key)])
         page = self._pages[self._label_for_key(key)]
+        self.stack.setCurrentWidget(page)
         refresh = getattr(page, "refresh", None)
         if refresh is not None:
-            refresh()
+            needs_refresh = getattr(page, "needs_refresh", None)
+            if needs_refresh is None or needs_refresh():
+                refresh()
         self._fade_in_page()
 
     def _label_for_key(self, key: str) -> str:
@@ -546,7 +639,7 @@ class MainWindow(QMainWindow):
     def _on_download_event(self, payload) -> None:
         if isinstance(payload, dict) and payload.get("id") is not None:
             self._speeds.pop(payload["id"], None)
-        self._refresh_stats()
+        self._stats_timer.start()
         self._update_speed_label()
 
     def _on_update_available(self, payload) -> None:

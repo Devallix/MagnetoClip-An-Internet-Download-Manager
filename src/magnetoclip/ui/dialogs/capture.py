@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+from urllib.parse import urlsplit
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
@@ -35,6 +38,29 @@ def truncate_url(url: str, max_length: int = _MAX_URL_LENGTH) -> str:
     head = url[: max_length // 2]
     tail = url[-(max_length // 2) :]
     return f"{head}\u2026{tail}"
+
+
+def default_capture_name(url: str, detected_type: str | None = None) -> str:
+    """Derive a default filename from a URL for the capture dialog.
+
+    Telegram Web proxy links (``/a/progressive/document…``) carry a session
+    token instead of a filename, so fall back to the last path segment and, when
+    it lacks an extension, guess one from the detected content type.
+    """
+    try:
+        path = urlsplit(url).path
+    except ValueError:
+        path = ""
+    base = os.path.basename(path.rstrip("/")).strip()
+    if "." in base:
+        return base
+    extension = {
+        "image": ".jpg",
+        "audio": ".m4a",
+        "video": ".mp4",
+        "document": ".bin",
+    }.get(detected_type or "", "")
+    return f"{base}{extension}" if base else ""
 
 
 class CaptureDialog(QDialog):
@@ -90,6 +116,8 @@ class CaptureDialog(QDialog):
 
         layout.addWidget(QLabel("Filename"))
         self.filename_edit = QLineEdit()
+        if not (filename or "").strip():
+            filename = default_capture_name(url, detected_type)
         self.filename_edit.setText(filename or "")
         self.filename_edit.setPlaceholderText("Keep the server-provided name")
         layout.addWidget(self.filename_edit)
@@ -121,7 +149,7 @@ class CaptureDialog(QDialog):
         self.connections_spin = QSpinBox()
         self.connections_spin.setRange(1, 64)
         self.connections_spin.setValue(
-            int(context.settings.get("downloads.connections_per_download", 8))
+            int(context.settings.get("downloads.connections_per_download", 16))
         )
         connections_row.addWidget(self.connections_spin)
         connections_row.addStretch(1)
@@ -183,9 +211,7 @@ class CaptureDialog(QDialog):
             self.done(RESULT_DOWNLOAD_LATER)
 
     def _validate(self) -> bool:
-        if not self.filename_edit.text().strip():
-            self.filename_edit.setFocus()
-            return False
+        # An empty filename is allowed: the app keeps the server-provided name.
         return True
 
     def _browse(self) -> None:

@@ -40,6 +40,12 @@ else:
 
 SUPPORTED_BROWSERS = ("chrome", "edge", "firefox", "brave", "vivaldi", "chromium")
 
+# Shared scripts that must be evaluated before ``background.js`` in every
+# engine. The Chrome-family service worker loads them with ``importScripts``
+# (declared in the manifest), Firefox lists them in ``background.scripts`` in
+# exactly this order.
+BACKGROUND_SHARED_SCRIPTS = ("compat.js", "categories.js", "queue.js")
+
 _POLICY_KEY = {
     "chrome": r"SOFTWARE\Policies\Google\Chrome",
     "edge": r"SOFTWARE\Policies\Microsoft\Edge",
@@ -110,19 +116,33 @@ class BrowserIntegrationService:
     def extension_dir(self) -> Path:
         return Path(self.context.config_dir) / "browser_extension"
 
+    def extension_dir_firefox(self) -> Path:
+        return Path(self.context.config_dir) / "browser_extension_firefox"
+
     def extension_id(self) -> str:
         _key_path, public_key = ensure_extension_key(self.context.data_dir)
         return extension_id_from_public_key(public_key)
 
     def install_extension(self) -> Path:
-        """Copy the bundled extension to the config dir with the signing key.
+        """Copy the bundled extension into per-engine config dirs.
+
+        Chrome-family browsers require ``background.service_worker`` while
+        Firefox (with our ``strict_min_version`` of 115) only accepts
+        ``background.scripts``, so no single manifest satisfies both engines.
+        The same source files are synced to two folders, each with a manifest
+        tailored to its engine.
 
         Files are only written when their content differs from what is already
         on disk. Rewriting identical files on every launch would bump their
         mtime, which Chrome treats as an extension update and reloads the
         unpacked extension, invalidating content scripts in open tabs.
         """
-        target = self.extension_dir()
+        chrome_dir = self._sync_extension(self.extension_dir(), firefox=False)
+        self._sync_extension(self.extension_dir_firefox(), firefox=True)
+        log.info("browser_extension_prepared", path=str(chrome_dir))
+        return chrome_dir
+
+    def _sync_extension(self, target: Path, firefox: bool) -> Path:
         target.mkdir(parents=True, exist_ok=True)
         source = resource_path("browser_extension")
         for entry in source.iterdir():
@@ -134,10 +154,20 @@ class BrowserIntegrationService:
         manifest_path = target / "manifest.json"
         with open(manifest_path, "r", encoding="utf-8") as handle:
             manifest = json.load(handle)
-        _key_path, public_key = ensure_extension_key(self.context.data_dir)
-        manifest["key"] = public_key_base64(public_key)
+        if firefox:
+            manifest.pop("key", None)
+            manifest["background"] = {"scripts": [*BACKGROUND_SHARED_SCRIPTS, "background.js"]}
+            # Firefox 115 (our ``strict_min_version``) implements the MV2-era
+            # ``browser_action`` key; ``action`` only arrived in Firefox 109+ for
+            # MV3, so both spellings are emitted for maximum compatibility.
+            if "action" in manifest:
+                manifest["browser_action"] = manifest.pop("action")
+        else:
+            _key_path, public_key = ensure_extension_key(self.context.data_dir)
+            manifest["key"] = public_key_base64(public_key)
+            manifest.pop("browser_specific_settings", None)
+            manifest["background"] = {"service_worker": "background.js"}
         self._write_if_changed(manifest_path, json.dumps(manifest, indent=2))
-        log.info("browser_extension_prepared", path=str(target))
         return target
 
     @staticmethod
@@ -312,7 +342,11 @@ class BrowserIntegrationService:
             "launcher": str(launcher),
             "launcher_exists": launcher.exists(),
             "extension_dir": str(extension),
+            "extension_dir_firefox": str(self.extension_dir_firefox()),
             "extension_ready": (extension / "manifest.json").exists(),
+            "extension_firefox_ready": (
+                self.extension_dir_firefox() / "manifest.json"
+            ).exists(),
             "extension_id": extension_id,
             "browsers": browsers,
         }

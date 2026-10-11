@@ -41,6 +41,19 @@ class DownloadRepository:
         hash_expected: str | None = None,
         proxy_profile_id: int | None = None,
         auth_ref: str | None = None,
+        stream_context: dict[str, Any] | None = None,
+        playlist_id: str | None = None,
+        playlist_title: str | None = None,
+        playlist_item_index: int | None = None,
+        youtube_quality: str | None = None,
+        youtube_height: int | None = None,
+        youtube_width: int | None = None,
+        youtube_fps: int | None = None,
+        youtube_format: str | None = None,
+        youtube_format_selector: str | None = None,
+        youtube_merge_output_format: str | None = None,
+        youtube_format_label: str | None = None,
+        youtube_requested_quality: str | None = None,
     ) -> Download:
         download = Download(
             url=url,
@@ -54,6 +67,19 @@ class DownloadRepository:
             hash_expected=hash_expected,
             proxy_profile_id=proxy_profile_id,
             auth_ref=auth_ref,
+            stream_context_json=stream_context,
+            playlist_id=playlist_id,
+            playlist_title=playlist_title,
+            playlist_item_index=playlist_item_index,
+            youtube_quality=youtube_quality,
+            youtube_height=youtube_height,
+            youtube_width=youtube_width,
+            youtube_fps=youtube_fps,
+            youtube_format=youtube_format,
+            youtube_format_selector=youtube_format_selector,
+            youtube_merge_output_format=youtube_merge_output_format,
+            youtube_format_label=youtube_format_label,
+            youtube_requested_quality=youtube_requested_quality,
         )
         self.session.add(download)
         self.session.commit()
@@ -71,7 +97,9 @@ class DownloadRepository:
         limit: int = 500,
         offset: int = 0,
     ) -> list[Download]:
-        statement = select(Download).order_by(Download.created_at.desc())
+        statement = select(Download).order_by(
+            Download.created_at.desc(), Download.id.desc()
+        )
         if status is not None:
             statement = statement.where(Download.status == status)
         if category_id is not None:
@@ -195,21 +223,29 @@ class PendingCaptureRepository:
         *,
         filename: str | None = None,
         referrer: str | None = None,
+        user_agent: str | None = None,
+        headers: dict[str, str] | None = None,
         source: str | None = None,
         detected_type: str | None = None,
         cookies: dict[str, str] | None = None,
         data_base64: str | None = None,
         status: str = "pending",
+        page_url: str | None = None,
+        frame_url: str | None = None,
     ) -> PendingCapture:
         capture = PendingCapture(
             url=url,
             filename=filename,
             referrer=referrer,
+            user_agent=user_agent,
+            headers_json=headers or None,
             source=source,
             detected_type=detected_type,
             cookies_json=cookies or None,
             data_base64=data_base64,
             status=status,
+            page_url=page_url,
+            frame_url=frame_url,
         )
         self.session.add(capture)
         self.session.commit()
@@ -316,6 +352,80 @@ class BrowserDetectionRepository:
                     urls.add(url)
         return urls
 
+    def merge_files(
+        self,
+        page_url: str,
+        files: list[dict[str, Any]],
+        *,
+        max_files: int = 500,
+    ) -> tuple[BrowserDetection, int, list[str]]:
+        """Merge queued detections into the row for *page_url*.
+
+        The extension's queue syncs in batches that belong to different pages, so
+        entries are grouped per page and merged into that page's existing row
+        (one row per page keeps the Detected page, the tray notification and
+        removal semantics unchanged). Already-known URLs are not duplicated;
+        a repeat sync only fills in fields the stored copy is missing.
+
+        Returns ``(detection, added_count, stored_urls)``.
+        """
+        detection = self.session.scalars(
+            select(BrowserDetection)
+            .where(BrowserDetection.page_url == page_url)
+            .order_by(BrowserDetection.created_at.desc())
+            .limit(1)
+        ).first()
+        existing: list[dict[str, Any]] = list(detection.files_json or []) if detection else []
+        by_url = {
+            str((file or {}).get("url") or "").strip(): index
+            for index, file in enumerate(existing)
+        }
+        added = 0
+        for file in files:
+            url = str((file or {}).get("url") or "").strip()
+            if not url:
+                continue
+            index = by_url.get(url)
+            if index is None:
+                existing.append(file)
+                by_url[url] = len(existing) - 1
+                added += 1
+                continue
+            # Same URL seen again (retry after a failed sync): keep the stored
+            # copy but adopt anything it was missing, e.g. cookies learned from
+            # a later page visit.
+            stored = dict(existing[index] or {})
+            changed = False
+            for key, value in file.items():
+                if value in (None, "", {}):
+                    continue
+                if stored.get(key) in (None, "", {}):
+                    stored[key] = value
+                    changed = True
+            if changed:
+                existing[index] = stored
+        # Oldest entries fall off first: the queue is the source of truth for
+        # "not yet downloaded", and the page only mirrors the recent window.
+        trimmed = existing[-max_files:]
+        if detection is None:
+            detection = BrowserDetection(
+                page_url=page_url,
+                count=len(trimmed),
+                files_json=trimmed,
+                notified=added == 0,
+            )
+            self.session.add(detection)
+        else:
+            detection.files_json = trimmed
+            detection.count = len(trimmed)
+            if added:
+                # New files on a page the user was already told about: allow one
+                # more tray notification.
+                detection.notified = False
+        self.session.commit()
+        self.session.refresh(detection)
+        return detection, added, [str((f or {}).get("url") or "") for f in trimmed]
+
     def unnotified(self, limit: int = 50) -> list[BrowserDetection]:
         return list(
             self.session.scalars(
@@ -403,13 +513,18 @@ class BrowserRequestRepository:
     def get(self, request_id: int) -> Optional[BrowserRequest]:
         return self.session.get(BrowserRequest, request_id)
 
-    def next_queued(self) -> Optional[BrowserRequest]:
-        """Claim and mark as sent the oldest queued request (host writer)."""
+    def next_queued(self, types: Optional[list[str]] = None) -> Optional[BrowserRequest]:
+        """Claim and mark as sent the oldest queued request (host writer).
+
+        *types* restricts the claim to a subset. The host writer and the UI poll
+        the same table for different purposes, so each side asks only for its own
+        request types instead of racing for whichever row comes first.
+        """
+        query = select(BrowserRequest).where(BrowserRequest.status == "queued")
+        if types:
+            query = query.where(BrowserRequest.type.in_(list(types)))
         request = self.session.scalars(
-            select(BrowserRequest)
-            .where(BrowserRequest.status == "queued")
-            .order_by(BrowserRequest.created_at.asc(), BrowserRequest.id.asc())
-            .limit(1)
+            query.order_by(BrowserRequest.created_at.asc(), BrowserRequest.id.asc()).limit(1)
         ).first()
         if request is None:
             return None
@@ -421,14 +536,15 @@ class BrowserRequestRepository:
         self,
         request_id: int,
         *,
-        data_base64: str,
+        data_base64: str | None = None,
         meta: dict[str, Any] | None = None,
     ) -> bool:
         request = self.session.get(BrowserRequest, request_id)
         if request is None:
             return False
         request.status = "ready"
-        request.data_base64 = data_base64
+        if data_base64:
+            request.data_base64 = data_base64
         request.result_json = meta or {}
         self.session.commit()
         return True

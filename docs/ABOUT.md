@@ -6,7 +6,7 @@ MagnetoClip is an advanced download manager for Windows that turns the chaos of
 web downloads into an organized, one-click experience. Files, videos, music,
 documents, and torrents — MagnetoClip detects them as you browse, captures them
 reliably, and files them into smart, auto-sorted categories. It is developed
-and maintained by **Devallix**.
+and maintained by **Devallix** and built as a general-purpose download tool.
 
 This document is the source text for the "About" page of the MagnetoClip
 website.
@@ -40,6 +40,8 @@ on the web, MagnetoClip can bring it home.
 
 - **Multi-connection engine** — each file is split into parts fetched in
   parallel (up to 64 connections per download).
+- **In-place downloads** — files are usually written straight to their final
+  destination, so there is no merge step and no double disk usage.
 - **Resume & retry** — interrupted jobs pick up where they stopped
   (`.mclip` sidecar files) and transient failures retry with backoff.
 - **Integrity checking** — a finished file is verified before it is marked
@@ -60,6 +62,9 @@ on the web, MagnetoClip can bring it home.
 - **Captures streaming media** from dozens of popular video and music sites,
   plus raw HLS (`.m3u8`) and DASH (`.mpd`) streams, merged into a single
   playable file with bundled FFmpeg tooling.
+- **Smart quality flow** — per-video resolution picker (*best*, presets, or
+  *ask each time*) covering single videos and playlists, plus playlist
+  downloads with per-video selection.
 - **Can become your default downloader**, intercepting every browser download
   and routing it through MagnetoClip instead.
 
@@ -68,7 +73,8 @@ on the web, MagnetoClip can bring it home.
 - **Magnet links and `.torrent` files** — add either, or register MagnetoClip
   to open them system-wide.
 - **Modern engine** — DHT, PEX, protocol encryption, per-torrent and global
-  throttles, configurable listen port and limits.
+  throttles, configurable listen port and limits, plus performance tuning for
+  large swarms (disk cache, hashing threads, request queue, TCP preference).
 - **Sequential download** for near-instant preview playback, and an optional
   auto-seed mode.
 - **Live status** — progress, speed, peers/seeds, ETA, and a detailed file
@@ -86,6 +92,9 @@ on the web, MagnetoClip can bring it home.
   exposes your filesystem).
 - **Proxy profiles** — route individual downloads through `http`, `https`, or
   `socks5` proxies, per-file or as a default.
+- **Sites reference** — a built-in, offline reference of third-party websites
+  useful for finding content, with clickable links. MagnetoClip is not
+  affiliated with, and does not endorse, any of the listed sites.
 - **System tray** — pause/resume everything, open the remote dashboard, and
   jump to finished files without opening the main window.
 
@@ -109,7 +118,7 @@ See the Privacy Policy for full details.
 ## About the developer
 
 **Devallix** is the developer behind MagnetoClip — a self-taught software
-developer with two years of hands-on experience building desktop applications,
+developer with years of hands-on experience building desktop applications,
 download technology, and tools that people use every day.
 
 MagnetoClip is the product of that journey: a single, focused tool designed
@@ -134,6 +143,6 @@ the Terms of Service for acceptable use.
 
 ---
 
-*Developed by Devallix · "Capture the Web" · MagnetoClip v0.2.7*
+*Developed by Devallix · "Capture the Web" · MagnetoClip v1.1.0*
 
 *See also: [Terms of Service](TERMS_OF_SERVICE.md) · [Privacy Policy](PRIVACY_POLICY.md) · [End User License Agreement](EULA.md)*

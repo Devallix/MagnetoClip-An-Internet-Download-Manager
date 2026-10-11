@@ -175,6 +175,121 @@ def _migration_014_drop_schedule_rules(engine: Engine) -> None:
         conn.execute(text("DROP TABLE IF EXISTS schedule_rules"))
 
 
+def _migration_015_pending_capture_ua(engine: Engine) -> None:
+    """Add browser User-Agent storage so stream downloads can replay the exact
+    UA a Cloudflare ``cf_clearance`` cookie is bound to (guarded)."""
+    columns = {column["name"] for column in inspect(engine).get_columns("pending_captures")}
+    with engine.begin() as conn:
+        if "user_agent" not in columns:
+            conn.execute(
+                text("ALTER TABLE pending_captures ADD COLUMN user_agent VARCHAR(512)")
+            )
+
+
+def _migration_016_stream_context(engine: Engine) -> None:
+    """Add stream request-context storage (guarded).
+
+    ``downloads.stream_context_json`` stores capture-time RequestContext extras
+    (page/frame URL, host cookies, capture timestamp) that Drive the HLS
+    pipeline; ``error_code`` carries the categorized streaming error taxonomy.
+    ``pending_captures.page_url``/``frame_url`` pin the tab/frame that issued a
+    detected manifest so the download can re-use the correct browser context.
+    """
+    download_columns = {c["name"] for c in inspect(engine).get_columns("downloads")}
+    capture_columns = {c["name"] for c in inspect(engine).get_columns("pending_captures")}
+    with engine.begin() as conn:
+        if "stream_context_json" not in download_columns:
+            conn.execute(
+                text("ALTER TABLE downloads ADD COLUMN stream_context_json JSON")
+            )
+        if "error_code" not in download_columns:
+            conn.execute(text("ALTER TABLE downloads ADD COLUMN error_code VARCHAR(64)"))
+        if "page_url" not in capture_columns:
+            conn.execute(
+                text("ALTER TABLE pending_captures ADD COLUMN page_url VARCHAR(4096)")
+            )
+        if "frame_url" not in capture_columns:
+            conn.execute(
+                text("ALTER TABLE pending_captures ADD COLUMN frame_url VARCHAR(4096)")
+            )
+
+
+def _migration_018_youtube_quality(engine: Engine) -> None:
+    """Add per-download YouTube quality columns (guarded).
+
+    Stores the requested format selection and the actual resolution captured
+    after download, so queue rows can show what was asked for versus what the
+    platform actually served (the ``[height<=N]`` 'lower if unavailable'
+    fallback). ``playlist_items`` gains the per-video requested/actual pair.
+    """
+    download_columns = {c["name"] for c in inspect(engine).get_columns("downloads")}
+    item_columns = {c["name"] for c in inspect(engine).get_columns("playlist_items")}
+    with engine.begin() as conn:
+        add = [
+            ("youtube_quality", "VARCHAR(32)"),
+            ("youtube_height", "INTEGER"),
+            ("youtube_width", "INTEGER"),
+            ("youtube_fps", "INTEGER"),
+            ("youtube_format", "VARCHAR(128)"),
+            ("youtube_format_selector", "VARCHAR(512)"),
+            ("youtube_merge_output_format", "VARCHAR(32)"),
+            ("youtube_format_label", "VARCHAR(256)"),
+            ("youtube_requested_quality", "VARCHAR(64)"),
+            ("actual_width", "INTEGER"),
+            ("actual_height", "INTEGER"),
+            ("actual_fps", "REAL"),
+        ]
+        for name, ddl in add:
+            if name not in download_columns:
+                conn.execute(text(f"ALTER TABLE downloads ADD COLUMN {name} {ddl}"))
+        if "requested_quality" not in item_columns:
+            conn.execute(
+                text(
+                    "ALTER TABLE playlist_items "
+                    "ADD COLUMN requested_quality VARCHAR(64)"
+                )
+            )
+        if "actual_quality" not in item_columns:
+            conn.execute(
+                text("ALTER TABLE playlist_items ADD COLUMN actual_quality VARCHAR(64)")
+            )
+
+
+def _migration_017_playlists(engine: Engine) -> None:
+    """Add playlist tables and playlist grouping columns (guarded).
+
+    Creates ``playlists`` / ``playlist_items`` and, on ``downloads``, the three
+    optional columns used to group queue rows by their parent playlist.
+    """
+    from .models import Playlist, PlaylistItem
+
+    Playlist.__table__.create(engine, checkfirst=True)
+    PlaylistItem.__table__.create(engine, checkfirst=True)
+
+    columns = {column["name"] for column in inspect(engine).get_columns("downloads")}
+    with engine.begin() as conn:
+        if "playlist_id" not in columns:
+            conn.execute(
+                text("ALTER TABLE downloads ADD COLUMN playlist_id VARCHAR(128)")
+            )
+        if "playlist_title" not in columns:
+            conn.execute(
+                text("ALTER TABLE downloads ADD COLUMN playlist_title VARCHAR(1024)")
+            )
+        if "playlist_item_index" not in columns:
+            conn.execute(
+                text("ALTER TABLE downloads ADD COLUMN playlist_item_index INTEGER")
+            )
+
+
+def _migration_019_pending_capture_headers(engine: Engine) -> None:
+    """Persist captured browser request headers for protected HLS manifests."""
+    columns = {column["name"] for column in inspect(engine).get_columns("pending_captures")}
+    with engine.begin() as conn:
+        if "headers_json" not in columns:
+            conn.execute(text("ALTER TABLE pending_captures ADD COLUMN headers_json JSON"))
+
+
 MIGRATIONS: list[Migration] = [
     _migration_001_create_all,
     _migration_002_media_columns,
@@ -190,6 +305,11 @@ MIGRATIONS: list[Migration] = [
     _migration_012_schedule_rules,
     _migration_013_speed_tests,
     _migration_014_drop_schedule_rules,
+    _migration_015_pending_capture_ua,
+    _migration_016_stream_context,
+    _migration_017_playlists,
+    _migration_018_youtube_quality,
+    _migration_019_pending_capture_headers,
 ]
 
 

@@ -3,7 +3,7 @@ from magnetoclip.config.settings import DEFAULTS, Settings
 
 def test_defaults_loaded():
     settings = Settings()
-    assert settings.get("downloads.connections_per_download") == 8
+    assert settings.get("downloads.connections_per_download") == 16
     assert settings.get("network.user_agent") == DEFAULTS["network.user_agent"]
     assert settings.get("downloads.simultaneous") == 3
 
@@ -31,7 +31,7 @@ def test_store_roundtrip_preserves_defaults():
     restored = Settings.from_store(settings.to_store_dict())
     assert restored.get("downloads.simultaneous") == 5
     assert restored.get("appearance.theme") == "light"
-    assert restored.get("downloads.connections_per_download") == 8
+    assert restored.get("downloads.connections_per_download") == 16
 
 
 def test_default_directory_points_to_user_downloads():

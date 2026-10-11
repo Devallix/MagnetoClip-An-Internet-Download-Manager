@@ -27,6 +27,20 @@ log = get_logger(__name__)
 DEFAULT_FORMAT = "json"
 
 
+def _windowless_kwargs() -> dict:
+    """Kwargs that run a spawned binary without a console window.
+
+    On Windows every console executable spawned by the app - ffmpeg, ffprobe -
+    opens a command-prompt window for as long as it runs unless told otherwise.
+    A preview transcode takes seconds, so the first preview of a file would
+    leave a stray ``cmd`` window on the user's screen. ``CREATE_NO_WINDOW``
+    keeps the process headless; on non-Windows nothing is needed.
+    """
+    if os.name != "nt":
+        return {}
+    return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+
+
 class FFmpegNotFoundError(RuntimeError):
     pass
 
@@ -171,6 +185,7 @@ def _supported_encoders(ffmpeg: str) -> set[str] | None:
             stderr=subprocess.STDOUT,
             timeout=20,
             check=False,
+            **_windowless_kwargs(),
         )
     except (OSError, subprocess.SubprocessError):
         _ENCODER_CACHE[ffmpeg] = set()
@@ -301,6 +316,7 @@ async def _run_ffmpeg(
             *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **_windowless_kwargs(),
         )
     except OSError as exc:
         raise FFmpegRunError(f"could not start ffmpeg: {exc}")
@@ -399,6 +415,7 @@ def _run_ffmpeg_sync(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            **_windowless_kwargs(),
         )
     except OSError as exc:
         return -1, f"could not start ffmpeg: {exc}"
@@ -481,6 +498,7 @@ async def probe(path: str | Path, locator: FFmpegLocator | None = None) -> dict 
             *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **_windowless_kwargs(),
         )
         stdout, _stderr = await asyncio.wait_for(result.communicate(), timeout=30)
         if result.returncode != 0:
