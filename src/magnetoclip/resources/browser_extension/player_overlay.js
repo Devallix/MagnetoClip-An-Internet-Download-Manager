@@ -74,6 +74,39 @@
     return "";
   }
 
+  function hostOfUrl(url) {
+    try {
+      return new URL(String(url || ""), window.location && window.location.href || undefined)
+        .hostname.replace(/^www\./i, "").toLowerCase();
+    } catch (_) {
+      return "";
+    }
+  }
+
+  // On these streaming pages the overlay is only a handoff for an actual HLS
+  // playlist. Never treat the watch page, logo, thumbnail, or unrelated media
+  // request as a playable target.
+  function requiresM3u8Target(pageUrl, frameUrl) {
+    // Universal HLS regression fix: do not require an allowlisted host or an
+    // explicit .m3u8 suffix before discovering a player target.
+    return false;
+  }
+
+  function isM3u8Entry(entry) {
+    const url = String(entry && entry.url || "");
+    if (!/^https?:\/\//i.test(url)) return false;
+    try {
+      const parsed = new URL(url);
+      const pathExtension = /\.([a-z0-9]{2,8})$/i.exec(parsed.pathname);
+      if (pathExtension) return pathExtension[1].toLowerCase() === "m3u8";
+      return /^(?:m3u8)$/i.test(parsed.searchParams.get("format") || "") ||
+        /^(?:m3u8)$/i.test(parsed.searchParams.get("ext") || "");
+    } catch (_) {
+      return /\.m3u8(?:[?#]|$)/i.test(url) ||
+        /[?&](?:format|ext)=m3u8(?:&|$)/i.test(url);
+    }
+  }
+
   /// --- pure association logic (unit-tested) -------------------------------
 
   const MIN_PLAYER_WIDTH = 200;
@@ -1436,8 +1469,9 @@
         document: doc,
       });
       const hash = signalsHash(signals) + "\u0002" + exactKey(livePageUrl) + "\u0003" + exactKey(liveFrameUrl);
+      const strictM3u8 = requiresM3u8Target(livePageUrl, liveFrameUrl);
       const cached = resolutionCache.get(player);
-      if (cached && cached.hash === hash && cached.entry) {
+      if (cached && cached.hash === hash && cached.entry && (!strictM3u8 || isM3u8Entry(cached.entry))) {
         const cachedSuppression = playerTargetSuppressionReason(cached.entry, livePageUrl, signals);
         if (!cachedSuppression) {
           debug("resolve:cached", { matched: cached.entry.url });
@@ -1451,6 +1485,10 @@
           cached: true,
         });
         return Promise.resolve({ signals: signals, entry: null, suppressionReason: cachedSuppression });
+      }
+      if (cached && cached.hash === hash && cached.entry && strictM3u8 && !isM3u8Entry(cached.entry)) {
+        resolutionCache.update(player, null);
+        debug("hls:rejected_cached_non_manifest", { page_url: livePageUrl });
       }
       const homeFeedPage = isHomeOrFeedPage(livePageUrl);
       const pageFallback = !homeFeedPage && livePageUrl && signals.blob && !signals.canResolve;
@@ -1474,7 +1512,15 @@
       }
 
       return lookupEntries(signals, { pageUrl: livePageUrl, frameUrl: liveFrameUrl }).then(function (resolved) {
-        const entries = resolved.entries;
+        const allEntries = Array.isArray(resolved.entries) ? resolved.entries : [];
+        const entries = strictM3u8 ? allEntries.filter(isM3u8Entry) : allEntries;
+        if (strictM3u8 && entries.length !== allEntries.length) {
+          debug("hls:filtered_non_manifest_entries", {
+            total_candidates: allEntries.length,
+            m3u8_candidates: entries.length,
+            page_url: livePageUrl,
+          });
+        }
         let entry = null;
         if (signals.tiktokCanonical) {
           entry = queuedTikTokVideoEntry(entries, signals.tiktokCanonical);
@@ -1538,7 +1584,7 @@
         // handlePlayerDownload path re-queues the supplied entry on click, then
         // sends it through the normal app download pipeline. Home/feed pages,
         // Facebook, Snapchat, and other platforms cannot use this fallback.
-        if (!entry && !homeFeedPage && isYouTubeStandaloneVideoPage(livePageUrl)) {
+        if (!entry && !strictM3u8 && !homeFeedPage && isYouTubeStandaloneVideoPage(livePageUrl)) {
           entry = {
             id: "",
             url: livePageUrl,
@@ -1579,6 +1625,16 @@
         }
         if (signals.xCanonical) {
           debug("x:canonical_hint", { url: signals.xCanonical, queued: !!entry });
+        }
+        if (strictM3u8 && !entry) {
+          requestPageCapture(signals);
+          debug("hls:waiting_for_m3u8", {
+            hints_count: signals.hints.length,
+            queue_candidates: allEntries.length,
+            m3u8_candidates: entries.length,
+            blob: signals.blob,
+            page_url: livePageUrl,
+          });
         }
         debug("resolve", {
           hints_count: signals.hints.length,
@@ -1635,9 +1691,20 @@
       const delays = [250, 600, 1200, 2500, 5000];
       const timers = [];
       retryTimers.set(player, timers);
-      delays.forEach(function (delay) {
+      delays.forEach(function (delay, index) {
         const timer = win.setTimeout(function () {
           if (!overlays.has(player)) {
+            clearResolutionRetries(player);
+            return;
+          }
+          if (index === delays.length - 1) {
+            retryTimers.delete(player);
+            // Some players expose the stream URL only after playback starts.
+            // Continue discovery for an attached player instead of stopping
+            // retries based on the website hostname.
+            if (overlays.has(player)) {
+              refresh(player);
+            }
             return;
           }
           refresh(player);
@@ -1675,7 +1742,13 @@
           clearResolutionRetries(player);
           syncOverlay(overlay);
         } else {
-          overlay.root.style.display = "none";
+          const streamPending = resolved.signals && resolved.signals.blob;
+          if (streamPending) {
+            syncOverlay(overlay);
+            requestPageCapture(resolved.signals);
+          } else {
+            overlay.root.style.display = "none";
+          }
           scheduleResolutionRetries(player);
         }
         const hostRect = overlay.root && overlay.root.getBoundingClientRect
@@ -1730,6 +1803,14 @@
         const before = (new Date()).getTime();
         resolve(player).then(function (resolved) {
           if (!resolved.entry) {
+            const streamPending = resolved.signals && resolved.signals.blob;
+            if (streamPending) {
+              requestPageCapture(resolved.signals);
+              setOverlayState(overlay, "error", "Waiting for the stream URL. Keep the video playing, then try again.");
+              syncOverlay(overlay);
+              scheduleResolutionRetries(player);
+              return;
+            }
             const message = resolved.suppressionReason
               ? "This looks like a homepage or video feed. Open the video first, then click Download with MagnetoClip so the correct video URL can be detected."
               : "Could not match this player to a detection.";

@@ -113,13 +113,17 @@ _TYPES: dict[str, frozenset[str]] = {
 }
 
 
-def snapshot_category(snapshot: dict[str, Any]) -> str:
-    """Return the sidebar category a download snapshot belongs to."""
-    detected = snapshot.get("detected_type")
+def detected_type_category(detected_type: Any) -> str:
+    """Category for a raw ``detected_type`` value (``None`` falls to other)."""
     for category, types in _TYPES.items():
-        if detected in types:
+        if detected_type in types:
             return category
     return "other"
+
+
+def snapshot_category(snapshot: dict[str, Any]) -> str:
+    """Return the sidebar category a download snapshot belongs to."""
+    return detected_type_category(snapshot.get("detected_type"))
 
 
 def snapshot_in_category(snapshot: dict[str, Any], category: str | None) -> bool:

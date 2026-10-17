@@ -265,12 +265,12 @@ def test_fit_to_work_area_clamps_window(qtbot, context):
     assert window.y() + window.height() <= area.y() + area.height()
 
 
-def test_page_switch_applies_fade(qtbot, context):
+def test_page_switch_sets_no_graphics_effect(qtbot, context):
     window = MainWindow(context)
     qtbot.addWidget(window)
     window._activate("Settings")
     assert window.stack.currentWidget() is window._pages["Settings"]
-    assert window.stack.currentWidget().graphicsEffect() is not None
+    assert window.stack.currentWidget().graphicsEffect() is None
 
 
 def test_dark_palette_defaults(qtbot, context):
@@ -549,6 +549,24 @@ def test_capture_watcher_skip_all_does_not_suppress_future_captures(qtbot, conte
         PendingCaptureRepository(session).add("https://example.com/b.zip")
     with context.session_factory() as session:
         assert len(PendingCaptureRepository(session).pending()) == 1
+
+
+def test_capture_watcher_idle_poll_skips_queries(qtbot, context):
+    """When nothing has written to the DB, a poll must not run its queries.
+
+    Every poll opens SQLAlchemy sessions and SELECTs on the GUI thread; gating
+    the work on the shared DB files' mtime/size keeps idle time free of them.
+    """
+    from magnetoclip.ui.components.capture_watcher import CaptureWatcher
+
+    watcher = CaptureWatcher(context)
+    assert watcher.poll() == 0  # primes the snapshot
+    stamp = watcher._db_stamp
+    assert stamp is not None
+
+    # No writes happened since the previous poll: the poll body is skipped.
+    assert watcher.poll() == 0
+    assert watcher._db_stamp == stamp
 
 
 def test_capture_watcher_syncs_browser_host_downloads(qtbot, context):

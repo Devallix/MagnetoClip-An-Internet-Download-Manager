@@ -196,9 +196,9 @@ class OverviewPage(Page):
         events.connect(Events.PROGRESS_UPDATED, self._on_progress)
         events.connect(Events.SPEED_UPDATED, self._on_speed)
 
-        # refresh() re-reads the whole snapshot table for the stat cards;
-        # coalesce bursts of DOWNLOAD_UPDATED events instead of re-scanning
-        # once per update. The recent-activity card still updates immediately.
+        # refresh() re-reads aggregate stats for the stat cards; coalesce
+        # bursts of DOWNLOAD_UPDATED events instead of re-querying once per
+        # update. The recent-activity card still updates immediately.
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.setInterval(400)
@@ -265,17 +265,13 @@ class OverviewPage(Page):
         manager = getattr(self.context, "manager", None)
         if manager is None:
             return
-        snapshots = manager.list_snapshots(limit=2000)
-        active = sum(1 for s in snapshots if s["status"] not in TERMINAL)
-        completed = sum(1 for s in snapshots if s["status"] == "completed")
-        total_bytes = sum(
-            s.get("size_downloaded") or 0
-            for s in snapshots
-            if s["status"] == "completed"
-        )
+        stats = manager.stats()
+        rows = stats["rows"]
+        active = sum(count for _status, _detected, count in rows if _status not in TERMINAL)
+        completed = sum(count for status, _detected, count in rows if status == "completed")
         self.active_card.set_value(str(active))
         self.completed_card.set_value(str(completed))
-        self.bytes_card.set_value(format_bytes(total_bytes))
+        self.bytes_card.set_value(format_bytes(stats["completed_bytes"]))
         self.empty_label.setVisible(len(self.recent_cards) == 0)
         self._dirty = False
         self._refresh_indexed_card()

@@ -32,17 +32,34 @@ _STATE_HUES = {
 
 
 class _Ticker(QObject):
-    """Application-wide animation clock driving every visible liquid bar."""
+    """Application-wide animation clock driving every visible liquid bar.
+
+    The timer only runs while at least one bar is subscribed (visible and
+    animating), so a table of completed/paused rows — or a page without
+    progress bars — costs nothing between ticks instead of repainting every
+    bar ~33 times a second for the whole session.
+    """
 
     tick = Signal(int)
 
     def __init__(self) -> None:
         super().__init__()
         self._phase = 0
+        self._refs = 0
         self._timer = QTimer(self)
         self._timer.setInterval(_TICK_MS)
         self._timer.timeout.connect(self._advance)
-        self._timer.start()
+
+    def acquire(self) -> None:
+        self._refs += 1
+        if self._refs == 1:
+            self._phase = 0
+            self._timer.start()
+
+    def release(self) -> None:
+        self._refs = max(0, self._refs - 1)
+        if self._refs == 0:
+            self._timer.stop()
 
     def _advance(self) -> None:
         self._phase += 1
@@ -92,6 +109,7 @@ class LiquidProgressBar(QProgressBar):
             return
         self._state = state
         self.update()
+        self._sync_subscription()
 
     def set_indeterminate(self, value: bool) -> None:
         """Show a sloshing liquid level instead of a value while work is pending."""
@@ -99,24 +117,43 @@ class LiquidProgressBar(QProgressBar):
             return
         self._indeterminate = value
         self.update()
+        self._sync_subscription()
 
     def set_fraction(self, value: float) -> None:
         """Set progress from a 0.0–1.0 fraction."""
         self.setValue(int(max(0.0, min(1.0, value)) * 100))
+
+    def setValue(self, value: int) -> None:  # noqa: N802 - Qt override
+        super().setValue(value)
+        self._sync_subscription()
 
     def _trigger_repaint(self) -> None:
         self.update()
 
     # ----- lifecycle / animation subscription -----
 
+    def _sync_subscription(self) -> None:
+        """Subscribe only while this bar is visible AND actually animating.
+
+        A bar that is hidden, or finished/paused at rest, has nothing to
+        redraw each tick; keeping it subscribed would run the shared ticker
+        and repaint it ~33×/second pointlessly.
+        """
+        self._set_subscribed(self.isVisible() and self._animating())
+
     def _set_subscribed(self, on: bool) -> None:
         if self._subscribed == on:
             return
         ticker = _shared_ticker()
         if on:
+            ticker.acquire()
             ticker.tick.connect(self._on_tick)
         else:
-            ticker.tick.disconnect(self._on_tick)
+            try:
+                ticker.tick.disconnect(self._on_tick)
+            except RuntimeError:
+                pass
+            ticker.release()
         self._subscribed = on
 
     def _on_tick(self, phase: int) -> None:
@@ -126,11 +163,11 @@ class LiquidProgressBar(QProgressBar):
 
     def showEvent(self, event) -> None:  # noqa: N802 - Qt override
         super().showEvent(event)
-        self._set_subscribed(True)
+        self._sync_subscription()
 
     def hideEvent(self, event) -> None:  # noqa: N802 - Qt override
-        self._set_subscribed(False)
         super().hideEvent(event)
+        self._sync_subscription()
 
     # ----- painting -----
 

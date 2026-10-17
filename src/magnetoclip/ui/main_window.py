@@ -10,7 +10,6 @@ from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QFrame,
-    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -27,7 +26,7 @@ from magnetoclip.resources import app_icon, resource_path
 from magnetoclip.services.logging.setup import get_logger
 from magnetoclip.version import __version__
 
-from .categories import CATEGORY_LABELS, CATEGORY_ORDER, snapshot_category
+from .categories import CATEGORY_LABELS, CATEGORY_ORDER, detected_type_category
 from .components.buttons import CategoryButton, VerticalIconButton
 from .components.capture_watcher import CaptureWatcher
 from .components.completion_notifier import CompletionNotifier
@@ -51,6 +50,7 @@ from .util import format_speed
 
 log = get_logger(__name__)
 
+ACTIVE_STATUSES = {"connecting", "downloading", "retrying", "verifying"}
 TERMINAL_STATUSES = {"completed", "failed", "verification_failed", "stopped"}
 
 NAV_ITEMS = [
@@ -444,23 +444,6 @@ class MainWindow(QMainWindow):
             button.set_compact(compact)
         self._sidebar_caption.setVisible(not compact)
 
-    # ----- page transitions -----
-
-    def _fade_in_page(self) -> None:
-        widget = self.stack.currentWidget()
-        if widget is None:
-            return
-        effect = QGraphicsOpacityEffect(widget)
-        widget.setGraphicsEffect(effect)
-        animation = QPropertyAnimation(effect, b"opacity", self)
-        animation.setDuration(120)
-        animation.setStartValue(0.0)
-        animation.setEndValue(1.0)
-        animation.setEasingCurve(QEasingCurve.OutCubic)
-        animation.finished.connect(lambda w=widget: w.setGraphicsEffect(None))
-        animation.start(QPropertyAnimation.DeleteWhenStopped)
-        self._fade_animation = animation
-
     # ----- navigation -----
 
     def _open_detected(self, category: str | None = None) -> None:
@@ -533,7 +516,6 @@ class MainWindow(QMainWindow):
             needs_refresh = getattr(page, "needs_refresh", None)
             if needs_refresh is None or needs_refresh():
                 refresh()
-        self._fade_in_page()
 
     def _label_for_key(self, key: str) -> str:
         for item_key, label in NAV_ITEMS:
@@ -686,21 +668,22 @@ class MainWindow(QMainWindow):
         manager = getattr(self.context, "manager", None)
         if manager is None:
             return
-        snapshots = manager.list_snapshots(limit=2000)
+        stats = manager.stats()
+        rows = stats["rows"]
         counts = {category: 0 for category in CATEGORY_ORDER}
         active = 0
         finished = 0
-        for snapshot in snapshots:
-            counts[snapshot_category(snapshot)] += 1
-            if snapshot.get("status") in (
-                "connecting", "downloading", "retrying", "verifying",
-            ):
-                active += 1
-            if snapshot.get("status") in TERMINAL_STATUSES:
-                finished += 1
-        self.all_counter.setText(str(len(snapshots)))
+        total = 0
+        for status, detected_type, count in rows:
+            total += count
+            if status in ACTIVE_STATUSES:
+                active += count
+            if status in TERMINAL_STATUSES:
+                finished += count
+            counts[detected_type_category(detected_type)] += count
+        self.all_counter.setText(str(total))
         self.finished_counter.setText(str(finished))
-        self.unfinished_counter.setText(str(len(snapshots) - finished))
+        self.unfinished_counter.setText(str(total - finished))
         for category, count in counts.items():
             button = self._category_buttons.get(category)
             if button is not None:

@@ -91,7 +91,7 @@ DEFAULTS: dict[str, Any] = {
     "advanced.experimental": False,
     # Updates
     "updates.check_enabled": True,
-    "updates.endpoint": "https://releases.magnetoclip.dev/manifest.json",
+    "updates.endpoint": "https://github.com/Devallix/MagnetoClip-An-Internet-Download-Manager/raw/refs/heads/main/releases/manifest.json",
     "updates.last_checked": "",
     "updates.last_version": "",
     # Remote control (LAN dashboard)

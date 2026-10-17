@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import sessionmaker
 
 from ...app.context import AppContext
@@ -2372,6 +2372,31 @@ class DownloadManager:
         with self.session_factory() as session:
             downloads = DownloadRepository(session).list(**filters)
         return [self.snapshot_item(download) for download in downloads]
+
+    def stats(self) -> dict[str, Any]:
+        """Aggregate download counters without building full snapshots.
+
+        Returns ``rows`` (pairs of status/detected_type with counts) and the
+        sum of bytes for completed downloads, from two small GROUP BY queries
+        instead of reading up to thousands of rows into snapshot dicts.
+        """
+        with self.session_factory() as session:
+            rows = session.execute(
+                select(
+                    Download.status,
+                    Download.detected_type,
+                    func.count(Download.id).label("count"),
+                ).group_by(Download.status, Download.detected_type)
+            ).all()
+            completed_bytes = session.execute(
+                select(func.coalesce(func.sum(Download.size_downloaded), 0)).where(
+                    Download.status == DownloadStatus.completed
+                )
+            ).scalar_one()
+        return {
+            "rows": list(rows),
+            "completed_bytes": int(completed_bytes or 0),
+        }
 
     def get_download(self, download_id: int) -> Download | None:
         with self.session_factory() as session:

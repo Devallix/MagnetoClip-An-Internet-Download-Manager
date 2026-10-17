@@ -9,6 +9,7 @@ extension finds downloadable files on a page.
 
 from __future__ import annotations
 
+from pathlib import Path
 from urllib.parse import urlparse
 
 from PySide6.QtCore import QObject, QTimer
@@ -75,6 +76,38 @@ class CaptureWatcher(QObject):
         self._player_timer = QTimer(self)
         self._player_timer.setInterval(PLAYER_POLL_INTERVAL_MS)
         self._player_timer.timeout.connect(self._handle_player_downloads)
+        # Snapshot of the DB files, so idle polls can skip every query.
+        # Keep independent fingerprints for the general poller and the
+        # player-download timer. Sharing one stamp lets poll() consume a DB
+        # change first, causing _handle_player_downloads() to incorrectly skip
+        # the newly queued request on its next tick.
+        self._db_stamps: dict[str, tuple[tuple[int, int], ...] | None] = {
+            "poll": None,
+            "player": None,
+        }
+
+    def _db_unchanged(self, watcher: str = "poll") -> bool:
+        """True when no process has written to the shared DB since the last poll.
+
+        Polling runs on the GUI thread and every query opens a session; the
+        browser host can also write the DB at any time. When none of the
+        SQLite files (data, WAL, shared-memory) changed since last time, every
+        SELECT would return the previous result, so the poll is skipped entirely.
+        """
+        base = Path(self.context.database.path)
+        current = []
+        for suffix in ("", "-wal", "-shm"):
+            path = Path(f"{base}{suffix}")
+            try:
+                stat = path.stat()
+                current.append((stat.st_size, stat.st_mtime_ns))
+            except OSError:
+                current.append((0, 0))
+        stamp = tuple(current)
+        previous = self._db_stamps.get(watcher)
+        unchanged = stamp == previous
+        self._db_stamps[watcher] = stamp
+        return unchanged
 
     def _default_dialog(self, capture) -> CaptureDialog:
         return CaptureDialog(
@@ -96,6 +129,8 @@ class CaptureWatcher(QObject):
 
     def poll(self) -> int:
         """Process detections and captures. Returns the number of items handled."""
+        if self._db_unchanged("poll"):
+            return 0
         handled = 0
         handled += self._handle_detections()
         self._sync_downloads()
@@ -192,6 +227,8 @@ class CaptureWatcher(QObject):
 
     def _handle_player_downloads(self) -> int:
         """Start a player stream in the GUI process using Detected-page logic."""
+        if self._db_unchanged("player"):
+            return 0
         with self.context.session_factory() as session:
             request = BrowserRequestRepository(session).next_queued(["player_download"])
         if request is None:

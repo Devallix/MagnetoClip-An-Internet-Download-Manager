@@ -139,7 +139,9 @@ class YouTubeQualityDialog(QDialog):
         if ffmpeg_available is None:
             from ...media.streaming import _ffmpeg_available
 
-            ffmpeg_available = _ffmpeg_available()
+            manager = getattr(context, "manager", None)
+            settings = getattr(manager, "settings", None)
+            ffmpeg_available = _ffmpeg_available(settings=settings)
         self.ffmpeg_available = ffmpeg_available
 
         self._controller_factory = controller_factory or YouTubeMetadataController

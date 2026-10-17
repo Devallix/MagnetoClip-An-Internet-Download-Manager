@@ -81,9 +81,14 @@ STREAMING_SITE_HOSTS: tuple[str, ...] = (
     "hdtoday.to",
     "4thdmovie.com",
     "yflix.in",
+    "flaxfer.lol",
+    "hianimes.se",
 )
 
-_MANIFEST_RE = re.compile(r"\.(m3u8|mpd)(\?|#|$)", re.IGNORECASE)
+_MANIFEST_RE = re.compile(
+    r"\.(m3u8|mpd)(?:[?#]|$)|[?&](?:format|ext)=m3u8(?:&|$)|[?&](?:format|ext)=mpd(?:&|$)",
+    re.IGNORECASE,
+)
 
 
 def _host_of(url: str) -> str:
@@ -274,7 +279,11 @@ def is_hls_url(url: str) -> bool:
     """Return True when *url* points to an HLS M3U8 manifest URL."""
     if not url or not isinstance(url, str):
         return False
-    return bool(re.search(r"\.m3u8(?:[?#]|$)", url, re.IGNORECASE))
+    path = re.split(r"[?#]", url, maxsplit=1)[0]
+    path_extension = re.search(r"\.([a-z0-9]{2,8})$", path, re.IGNORECASE)
+    if path_extension:
+        return path_extension.group(1).lower() == "m3u8"
+    return bool(re.search(r"[?&](?:format|ext)=m3u8(?:&|$)", url, re.IGNORECASE))
 
 
 def is_hls_or_dash_url(url: str) -> bool:
@@ -335,10 +344,42 @@ def _sanitize_filename(name: str, max_len: int = 100) -> str:
     return name[:max_len] if name else "stream"
 
 
-def _ffmpeg_available() -> bool:
-    import shutil
+def _ffmpeg_available(settings=None) -> bool:
+    """Return whether MagnetoClip can resolve a usable FFmpeg executable.
 
-    return shutil.which("ffmpeg") is not None
+    Prefer the configured/bundled executable before falling back to PATH.
+    Import locally to avoid a module-import cycle: ffmpeg.py imports
+    DownloadCancelled from this module.
+    """
+    try:
+        from .ffmpeg import FFmpegLocator
+
+        locator = FFmpegLocator(settings=settings)
+        return locator.ffmpeg_available
+    except Exception:
+        # Keep download selection resilient if locator initialization itself
+        # fails; PATH remains a last-resort compatibility fallback.
+        import shutil
+
+        return shutil.which("ffmpeg") is not None
+
+
+def _ffmpeg_executable(settings=None) -> str | None:
+    """Return the exact FFmpeg executable path for yt-dlp, if available.
+
+    yt-dlp does not automatically use MagnetoClip's bundled FFmpeg. Supplying
+    this path explicitly is required on clean Windows machines where FFmpeg is
+    not installed globally or added to PATH.
+    """
+    try:
+        from .ffmpeg import FFmpegLocator
+
+        locator = FFmpegLocator(settings=settings)
+        return locator.ffmpeg() if locator.ffmpeg_available else None
+    except Exception:
+        import shutil
+
+        return shutil.which("ffmpeg")
 
 
 def _write_cookiefile(url: str, cookies) -> Path | None:
@@ -429,6 +470,9 @@ def resolve_stream(
         "format": selector,
         "_magnetoclip_url": url,
     }
+    ffmpeg_executable = _ffmpeg_executable()
+    if ffmpeg_executable:
+        base_params["ffmpeg_location"] = ffmpeg_executable
     if merge_output_format:
         base_params["merge_output_format"] = merge_output_format
     _apply_impersonation(base_params)
@@ -660,9 +704,14 @@ def download_stream(
     _apply_manifest_token(base_params, url)
     if headers:
         base_params["http_headers"] = dict(headers)
-    if not _ffmpeg_available():
+    ffmpeg_executable = _ffmpeg_executable()
+    if ffmpeg_executable:
+        # Explicitly point yt-dlp at the bundled executable; PATH lookup alone
+        # fails on first-time installs on machines without system FFmpeg.
+        base_params["ffmpeg_location"] = ffmpeg_executable
+    if not ffmpeg_executable:
         base_params["merge_output_format"] = None
-    if merge_output_format:
+    if merge_output_format and ffmpeg_executable:
         base_params["merge_output_format"] = merge_output_format
 
     # Anonymous default first; on transient blocks (403/CRT wall) rotate

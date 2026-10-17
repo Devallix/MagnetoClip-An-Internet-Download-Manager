@@ -7,7 +7,7 @@ It pairs an advanced multi-connection download core with a browser extension
 that detects files, media streams and torrents as you browse — then captures
 them into smart, auto-sorted categories.
 
-Current version: **1.1.0**
+Current version: **1.1.1**
 
 ## Documentation
 

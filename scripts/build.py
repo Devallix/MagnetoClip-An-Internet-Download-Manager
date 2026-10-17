@@ -56,7 +56,37 @@ def _clear_dist() -> None:
     shutil.rmtree(doomed, ignore_errors=True)
 
 
+def _ensure_bundled_ffmpeg() -> None:
+    """Ensure release builds include the bundled FFmpeg used by media merging.
+
+    The PyInstaller spec intentionally tolerates a missing binary for local
+    preview-only development. The release build entry point must not: without
+    FFmpeg, YouTube's separate video/audio formats cannot be merged.
+    """
+    ffmpeg = ROOT / "src" / "magnetoclip" / "resources" / "bin" / (
+        "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+    )
+    if ffmpeg.is_file() and ffmpeg.stat().st_size > 0:
+        print(f"Using bundled FFmpeg: {ffmpeg} ({ffmpeg.stat().st_size:,} bytes)")
+        return
+
+    fetch_script = ROOT / "scripts" / "fetch_ffmpeg.py"
+    if not fetch_script.is_file():
+        raise SystemExit(
+            f"Bundled FFmpeg is missing at {ffmpeg}, and {fetch_script} was not found."
+        )
+
+    print("Bundled FFmpeg is missing; downloading the pinned, checksum-verified build...")
+    subprocess.run([sys.executable, str(fetch_script)], cwd=ROOT, check=True)
+    if not ffmpeg.is_file() or ffmpeg.stat().st_size == 0:
+        raise SystemExit(
+            "FFmpeg fetch completed without producing the expected binary: "
+            f"{ffmpeg}"
+        )
+
+
 def build_app() -> None:
+    _ensure_bundled_ffmpeg()
     _require_pyinstaller()
     _clear_dist()
     print(f"Building with {SPEC.name}...")

@@ -15,7 +15,7 @@
 #endif
 
 #define MyAppName "MagnetoClip"
-#define MyAppVersion "0.2.8"
+#define MyAppVersion "1.1.1"
 #define MyAppPublisher "MagnetoClip"
 #define MyAppExeName "MagnetoClip.exe"
 

@@ -80,9 +80,13 @@ function mediaKindFromMime(mime) {
 
 function extensionFromUrl(url) {
   try {
-    const pathname = new URL(url).pathname.toLowerCase();
+    const parsed = new URL(url);
+    const pathname = parsed.pathname.toLowerCase();
     const match = pathname.match(/\.([a-z0-9]{2,8})$/);
-    return match ? match[1] : "";
+    if (match) return match[1];
+    const queryType = String(parsed.searchParams.get("format") || parsed.searchParams.get("ext") || "").toLowerCase();
+    if (["m3u8", "m3u", "mpd"].includes(queryType)) return queryType;
+    return "";
   } catch (error) {
     return "";
   }
@@ -414,10 +418,31 @@ function isTelegramAppShellUrl(url) {
   }
 }
 
+function strictM3u8HostUrl(url) {
+  // Universal HLS regression fix: media capture must be based on observed
+  // network/MIME/player evidence, not a hard-coded site allowlist.
+  return false;
+}
+
+function isExplicitM3u8Url(url) {
+  const value = String(url || "");
+  try {
+    const parsed = new URL(value);
+    const pathExtension = /\.([a-z0-9]{2,8})$/i.exec(parsed.pathname);
+    if (pathExtension) return pathExtension[1].toLowerCase() === "m3u8";
+    return /^(?:m3u8)$/i.test(parsed.searchParams.get("format") || "") ||
+      /^(?:m3u8)$/i.test(parsed.searchParams.get("ext") || "");
+  } catch (_) {
+    return /\.m3u8(?:[?#]|$)/i.test(value) ||
+      /[?&](?:format|ext)=m3u8(?:&|$)/i.test(value);
+  }
+}
+
 function entriesForPlayer(entries, signals, pageUrl, frameUrl, blob) {
   const list = [];
   const seen = new Set();
   const hasBlobSignal = blob === true || (signals || []).some((value) => /^blob:/i.test(String(value || "")));
+  const strictM3u8Page = strictM3u8HostUrl(pageUrl) || strictM3u8HostUrl(frameUrl);
   const facebookPage = isFacebookPageUrl(pageUrl);
   const tiktokPage = isTikTokPageUrl(pageUrl);
   const xPage = isXPageUrl(pageUrl);
@@ -458,6 +483,11 @@ function entriesForPlayer(entries, signals, pageUrl, frameUrl, blob) {
 
   for (const entry of entries || []) {
     if (!entry || !entry.url || seen.has(entry.url)) {
+      continue;
+    }
+    // For HLS-only streaming targets, never let a page URL, logo, thumbnail,
+    // or unrelated media item crowd out the real playlist in the bounded list.
+    if (strictM3u8Page && !isExplicitM3u8Url(entry.url)) {
       continue;
     }
     if (telegramAppShell && isTelegramAppShellUrl(entry.url)) {
@@ -614,6 +644,70 @@ async function resolvePlayerDetection(message, sender) {
     return { entry: null, error: "Detection is not ready in this browser." };
   }
   const entries = await QUEUE.all();
+
+  // HLS-only streaming targets must hand off an actual .m3u8 URL. Do not
+  // recreate a player target from the watch-page URL, logo, thumbnail, or any
+  // other queued resource when a playlist has not yet been detected.
+  if (strictM3u8HostUrl(pageUrl) || strictM3u8HostUrl(frameUrl)) {
+    const rawUrl = String(raw && raw.url || "");
+    let manifest = null;
+    if (isExplicitM3u8Url(rawUrl)) {
+      manifest = entries.find((candidate) =>
+        isExplicitM3u8Url(candidate && candidate.url) &&
+        (String(candidate.url) === rawUrl || queueEntryMatchesSignals(candidate, [rawUrl], pageUrl))
+      ) || null;
+      if (!manifest && raw) {
+        const recreated = await queueDetection({
+          url: rawUrl,
+          filename: raw.filename || "",
+          referrer: raw.referrer || frameUrl || pageUrl,
+          page_url: pageUrl,
+          frame_url: raw.frame_url || frameUrl || "",
+          source: "player_button",
+          detected_type: "hls",
+          mime_type: raw.mime_type || "",
+          headers: raw.headers,
+          cookies: raw.cookies,
+          user_agent: raw.user_agent,
+        });
+        if (recreated && isExplicitM3u8Url(recreated.url)) {
+          manifest = recreated;
+        } else {
+          const after = await QUEUE.all();
+          manifest = after.find((candidate) =>
+            isExplicitM3u8Url(candidate && candidate.url) &&
+            (String(candidate.url) === rawUrl || queueEntryMatchesSignals(candidate, [rawUrl], pageUrl))
+          ) || null;
+        }
+      }
+    }
+    if (!manifest) {
+      let manifests = entries.filter((candidate) => {
+        if (!candidate || !isExplicitM3u8Url(candidate.url)) return false;
+        const candidatePage = String(candidate.page_url || "");
+        const candidateFrame = String(candidate.frame_url || candidate.referrer || "");
+        const pageMatch = candidatePage && looseMatchKey(candidatePage) === looseMatchKey(pageUrl);
+        const frameMatch = candidateFrame && looseMatchKey(candidateFrame) === looseMatchKey(frameUrl);
+        return pageMatch || frameMatch || (!candidatePage && !candidateFrame);
+      });
+      // Some embed integrations record only the top tab URL, while others
+      // record the child-frame URL. If the page-scoped queue has exactly one
+      // playlist, it is safer to use that sole manifest than a page/logo URL.
+      if (!manifests.length) {
+        const allManifests = entries.filter((candidate) => candidate && isExplicitM3u8Url(candidate.url));
+        if (allManifests.length === 1) manifests = allManifests;
+      }
+      manifests.sort((a, b) => {
+        const rank = (entry) => /(?:master|index|playlist)[^/]*\.m3u8(?:[?#]|$)/i.test(String(entry.url || "")) ? 1 : 0;
+        return rank(b) - rank(a);
+      });
+      manifest = manifests[0] || null;
+    }
+    if (!manifest || !isExplicitM3u8Url(manifest.url)) {
+      return { entry: null, error: "No .m3u8 playlist is in the extension queue yet. Keep the video playing and try again." };
+    }
+    return { entry: manifest, error: "" };
+  }
 
   // On X/Twitter the player target must be an actual queued status permalink.
   // Never re-create a CDN URL (or a generic page URL) for an autoplay/feed
@@ -2821,6 +2915,12 @@ if (chrome.webRequest) {
 
       getTabUrl(details.tabId, details.documentUrl || details.initiator || "").then((tabUrl) => {
         const pageUrl = tabUrl || details.documentUrl || details.initiator || "";
+        const strictM3u8Page = strictM3u8HostUrl(pageUrl) ||
+          strictM3u8HostUrl(details.documentUrl || "") ||
+          strictM3u8HostUrl(details.initiator || "");
+        if (strictM3u8Page && (kind !== "hls" || !isExplicitM3u8Url(url))) {
+          return;
+        }
         const fallbackReferrer = details.documentUrl || details.initiator || pageUrl;
         const referrer = headers.Referer || headers.referer || fallbackReferrer;
         const userAgent = headers["User-Agent"] || headers["user-agent"] || "";
@@ -2838,7 +2938,7 @@ if (chrome.webRequest) {
         webCaptureCount += 1;
 
         getFrameUrl(details, frameFallback).then((frameUrl) => {
-          const detectedType = kind === "hls" || kind === "dash" ? "video" : kind;
+          const detectedType = strictM3u8Page ? "hls" : (kind === "hls" || kind === "dash" ? "video" : kind);
           const source = kind === "hls" || kind === "dash"
             ? "network_capture"
             : "network_media_capture";

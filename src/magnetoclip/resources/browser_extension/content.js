@@ -95,6 +95,7 @@
     "animekai.org.lv",
     "hdtoday24.at", "hdtodayz.app", "hdtoday.duckdns.org", "hdtoday.to",
     "4thdmovie.com",
+    "flaxfer.lol", "hianimes.se",
   ]);
 
   // Media CDNs whose stream requests are often labelled with a generic
@@ -423,6 +424,31 @@
     return Array.from(STREAMING_SITE_HOSTS).some(
       (candidate) => host === candidate || host.endsWith("." + candidate)
     );
+  }
+
+  // These streaming pages should hand the app a real HLS playlist, never the
+  // watch-page URL, logo, thumbnail, or an unrelated media request.
+  function requiresM3u8Target(host) {
+    const value = String(host || "").replace(/^www\./i, "").toLowerCase();
+    return (
+      value === "flaxfer.lol" || value.endsWith(".flaxfer.lol") ||
+      value === "hianimes.se" || value.endsWith(".hianimes.se") ||
+      isOnStreamingSiteHost(value) || isPlayerEmbedHost(value)
+    );
+  }
+
+  function isExplicitM3u8Url(url) {
+    const value = String(url || "");
+    try {
+      const parsed = new URL(value, location.href);
+      const pathExtension = /\.([a-z0-9]{2,8})$/i.exec(parsed.pathname);
+      if (pathExtension) return pathExtension[1].toLowerCase() === "m3u8";
+      return /^(?:m3u8)$/i.test(parsed.searchParams.get("format") || "") ||
+        /^(?:m3u8)$/i.test(parsed.searchParams.get("ext") || "");
+    } catch (_) {
+      return /\.m3u8(?:[?#]|$)/i.test(value) ||
+        /[?&](?:format|ext)=m3u8(?:&|$)/i.test(value);
+    }
   }
 
   function isMediaCdnUrl(url) {
@@ -1924,7 +1950,7 @@
       "vidsrc", "2embed", "ntplayer", "e1-player", "vidlink", "streamhub",
       "vidrock", "vidnest", "vidking", "vidfast", "vidup", "videasy",
       "multiembed", "superflix", "peachify", "gogo-play", "filelions",
-      "maru", "nvide", "embedsb", "embedme", "rutube",
+      "maru", "nvide", "embedsb", "embedme", "zokoanime", "rutube",
     ];
     return playerHostMarkers.some((m) => host.includes(m));
   }
@@ -1962,20 +1988,23 @@
     return captures;
   }
 
-  // HLS/DASH manifests are sometimes served without a discoverable extension
-  // (tokenized URLs like /get_stream?token=... or playlists served as
-  // application/vnd.apple.mpegurl). In a player-embed frame these path markers
-  // and MIME hints are a strong signal the request is the media manifest.
+  // Resource Timing does not expose reliable response MIME types. Treat only
+  // explicit playlist extensions or explicit format parameters as manifest
+  // evidence; generic paths such as /index or /master are too ambiguous.
   function isHlsManifestUrl(url) {
-    const clean = (url.split(/[?#]/)[0] || "").toLowerCase();
-    const full = url.toLowerCase();
+    // Resource Timing exposes URL and initiator, but not reliable response MIME
+    // types. Avoid treating generic paths such as /index, /live or /master as
+    // manifests: those can be ordinary pages, images or API endpoints.
+    const value = String(url || "");
+    const clean = (value.split(/[?#]/)[0] || "").toLowerCase();
+    const full = value.toLowerCase();
     return (
       /\.m3u8?$/.test(clean) ||
       /\.mpd$/.test(clean) ||
-      /\.mpd\?/.test(full) ||
-      /\/(?:hls|live|dash|index|playlist|master)(?:[\/?]|$)/.test(full) ||
-      /\.m3u8\?/.test(full) ||
-      /playlist\.m3u8/.test(full)
+      /\.m3u8(?:[?#]|$)/.test(full) ||
+      /\.mpd(?:[?#]|$)/.test(full) ||
+      /[?&](?:format|ext)=m3u8(?:&|$)/.test(full) ||
+      /[?&](?:format|ext)=mpd(?:&|$)/.test(full)
     );
   }
 
@@ -1993,10 +2022,12 @@
       if (initiator !== "xmlhttprequest" && initiator !== "fetch" && initiator !== "video" && initiator !== "media") {
         continue;
       }
-      if (isHlsManifestUrl(url) || extensionOf(url) === "m3u8" || extensionOf(url) === "mpd") {
-        if (SEGMENT_EXTS.has(extensionOf(url))) {
-          continue;
-        }
+      const strictM3u8 = requiresM3u8Target(hostOf(location.href));
+      const manifestMatch = strictM3u8
+        ? isExplicitM3u8Url(url)
+        : (isHlsManifestUrl(url) || extensionOf(url) === "m3u8" || extensionOf(url) === "mpd");
+      if (manifestMatch) {
+        if (SEGMENT_EXTS.has(extensionOf(url))) continue;
         manifests.add(url);
       }
     }
@@ -2027,6 +2058,10 @@
       const url = entry.name || "";
       diagnoseTelegramNetworkResource(url, entry.initiatorType, entry);
       if (!isHttpUrl(url)) {
+        continue;
+      }
+      const strictM3u8 = requiresM3u8Target(hostOf(location.href));
+      if (strictM3u8 && !isExplicitM3u8Url(url)) {
         continue;
       }
       const initiator = entry.initiatorType || "";
@@ -2127,8 +2162,17 @@
     // videos. For Telegram, require a real queued media/network URL or a finite
     // Blob capture instead of adding the entire chat page as a video target.
     const onResolvableHost = recognizedHost || (blobDetected.value && !isTelegramAppPage);
-    if (!onResolvableHost || reportedUrls.has(location.href)) {
+    const strictM3u8 = requiresM3u8Target(pageHost);
+    if (!onResolvableHost || (reportedUrls.has(location.href) && !strictM3u8)) {
       return [];
+    }
+    if (strictM3u8) {
+      const playlists = Array.from(manifests).filter(isExplicitM3u8Url);
+      return playlists.map((url) => ({
+        url: url,
+        filename: filenameOf(url) || pageTitle(),
+        detected_type: "hls",
+      }));
     }
     const anyPlaying = Array.from(
       document.querySelectorAll("video, audio")
@@ -2185,24 +2229,35 @@
   function reportDetectionUpdate(direct, manifests) {
     const files = [];
     const seen = new Set();
-    for (const [url, type] of direct) {
-      if (seen.has(url)) {
-        continue;
+    const strictM3u8 = requiresM3u8Target(hostOf(location.href));
+    if (strictM3u8) {
+      for (const url of manifests) {
+        if (!isExplicitM3u8Url(url) || seen.has(url)) continue;
+        seen.add(url);
+        files.push({ url: url, filename: filenameOf(url), detected_type: "hls" });
       }
-      seen.add(url);
-      files.push(directEntry(url, type));
-      if (files.length >= MAX_PAGE_SCAN_FILES) {
-        break;
+    } else {
+      for (const [url, type] of direct) {
+        if (seen.has(url)) {
+          continue;
+        }
+        seen.add(url);
+        files.push(directEntry(url, type));
+        if (files.length >= MAX_PAGE_SCAN_FILES) {
+          break;
+        }
       }
     }
-    for (const url of manifests) {
-      if (seen.has(url) || files.length >= MAX_PAGE_SCAN_FILES) {
-        continue;
+    if (!strictM3u8) {
+      for (const url of manifests) {
+        if (seen.has(url) || files.length >= MAX_PAGE_SCAN_FILES) {
+          continue;
+        }
+        seen.add(url);
+        files.push({ url: url, filename: filenameOf(url), detected_type: "stream" });
       }
-      seen.add(url);
-      files.push({ url: url, filename: filenameOf(url), detected_type: "stream" });
+      prependPageCapture(files);
     }
-    prependPageCapture(files);
     const snapshot = JSON.stringify({
       url: location.href,
       title: pageTitle(),
@@ -2225,6 +2280,7 @@
   function prependPageCapture(files) {
     const pageHost = hostOf(location.href);
     if (
+      !requiresM3u8Target(pageHost) &&
       (isOnYtdlpHost(pageHost) || isOnStreamingSiteHost(pageHost)) &&
       reportedUrls.has(location.href)
     ) {

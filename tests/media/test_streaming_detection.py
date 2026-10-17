@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from magnetoclip.media.streaming import (
@@ -102,6 +104,8 @@ class _CapturingYdl:
 def _patch_streaming(monkeypatch, info=None, *, ffmpeg=True):
     import yt_dlp
 
+    import magnetoclip.media.ffmpeg as ffmpeg_mod
+
     _CapturingYdl.captured.clear()
     if info is None:
         info = {
@@ -114,6 +118,12 @@ def _patch_streaming(monkeypatch, info=None, *, ffmpeg=True):
     _CapturingYdl._info = info
     monkeypatch.setattr(streaming_mod, "_detect_browser", lambda: None)
     monkeypatch.setattr(streaming_mod, "_ffmpeg_available", lambda: ffmpeg)
+
+    class _FakeLocator:
+        ffmpeg_available = ffmpeg
+        ffmpeg_path = "C:/ffmpeg/bin/ffmpeg.exe" if ffmpeg else None
+
+    monkeypatch.setattr(ffmpeg_mod, "FFmpegLocator", _FakeLocator)
     monkeypatch.setattr(yt_dlp, "YoutubeDL", _CapturingYdl)
     return streaming_mod
 
@@ -165,10 +175,38 @@ def test_download_stream_uses_selector_and_keeps_full_ladder(monkeypatch, tmp_pa
     params = _CapturingYdl.captured[-1]
     assert params["format"] == "bv[height<=1080]+ba/b"
     assert params["merge_output_format"] == "mp4"
-    assert params["http_chunk_size"] == 5 * 1024 * 1024
+    assert params["ffmpeg_location"] == str(Path("C:/ffmpeg/bin/ffmpeg.exe").parent)
     extractor_args = params.get("extractor_args", {})
     assert "youtube" not in extractor_args
     assert set(extractor_args) <= {"generic"}
+
+
+def test_download_stream_omits_ffmpeg_location_when_unavailable(monkeypatch, tmp_path):
+    """Without any resolvable ffmpeg, no ``ffmpeg_location`` is sent and the
+    merge selector degrades to the best single-file format."""
+    from magnetoclip.media.streaming import download_stream
+
+    _patch_streaming(monkeypatch, ffmpeg=False)
+    out = tmp_path / "v.mp4"
+    info = {
+        "title": "Probe",
+        "ext": "mp4",
+        "vcodec": "avc1.42001E",
+        "acodec": "none",
+        "requested_downloads": [{"filepath": str(out)}],
+    }
+    _CapturingYdl._info = info
+    download_stream(
+        "https://www.youtube.com/watch?v=ABC",
+        tmp_path,
+        "best",
+        format_selector="bv[height<=1080]+ba/b",
+        merge_output_format="mp4",
+    )
+    params = _CapturingYdl.captured[-1]
+    assert "ffmpeg_location" not in params
+    assert params["format"] == "b[acodec!=none][vcodec!=none][height<=1080]/b"
+    assert params["merge_output_format"] == "mp4"
 
 
 def test_is_stream_retryable_error_matches_blocks_and_403():
@@ -415,3 +453,43 @@ def test_write_cookiefile_accepts_header_string(tmp_path):
 def test_write_cookiefile_none_without_cookies():
     assert _write_cookiefile("https://example.com/x", None) is None
     assert _write_cookiefile("https://example.com/x", "") is None
+
+
+def test_ffmpeg_available_uses_bundled_binary(monkeypatch, tmp_path):
+    """The probe resolves through the locator, so the app's bundled ffmpeg
+    counts even when nothing is on the system PATH (fresh installs)."""
+    import magnetoclip.media.ffmpeg as ffmpeg_mod
+
+    bundled = tmp_path / "bundled"
+    bundled.mkdir()
+    (bundled / ffmpeg_mod._exe("ffmpeg")).write_bytes(b"x")
+    monkeypatch.setattr(ffmpeg_mod, "bundled_bin_dir", lambda: bundled)
+    monkeypatch.setattr(ffmpeg_mod.shutil, "which", lambda name: None)
+    assert streaming_mod._ffmpeg_available() is True
+
+
+def test_ffmpeg_available_false_without_bundled_or_path(monkeypatch, tmp_path):
+    import magnetoclip.media.ffmpeg as ffmpeg_mod
+
+    monkeypatch.setattr(ffmpeg_mod, "bundled_bin_dir", lambda: tmp_path / "empty")
+    monkeypatch.setattr(ffmpeg_mod.shutil, "which", lambda name: None)
+    assert streaming_mod._ffmpeg_available() is False
+
+
+def test_ffmpeg_available_falls_back_to_bundled_when_configured_missing(monkeypatch, tmp_path):
+    """A stale ``streaming.ffmpeg_path`` setting degrades to the bundled binary."""
+
+    class Settings:
+        def get(self, key, default=None):
+            if key == "streaming.ffmpeg_path":
+                return str(tmp_path / "missing")
+            return default
+
+    import magnetoclip.media.ffmpeg as ffmpeg_mod
+
+    bundled = tmp_path / "bundled"
+    bundled.mkdir()
+    (bundled / ffmpeg_mod._exe("ffmpeg")).write_bytes(b"x")
+    monkeypatch.setattr(ffmpeg_mod, "bundled_bin_dir", lambda: bundled)
+    monkeypatch.setattr(ffmpeg_mod.shutil, "which", lambda name: None)
+    assert streaming_mod._ffmpeg_available(Settings()) is True
