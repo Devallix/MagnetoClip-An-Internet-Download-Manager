@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      :root {
+        --bg: #0b0d14;
+        --surface: #131624;
+        --surface-alt: #1a1e31;
+        --border: #262b44;
+        --text: #e6e9f5;
+        --text-muted: #8a92b5;
+        --accent: #8b5cf6;
+        --accent-cyan: #22d3ee;
+        --success: #34d399;
+        --danger: #f87171;
+      }
+
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        width: 320px;
+        background: var(--bg);
+        color: var(--text);
+        font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+        font-size: 13px;
+        user-select: none;
+      }
+
+      header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 14px;
+        background: linear-gradient(135deg, var(--surface) 0%, var(--surface-alt) 100%);
+        border-bottom: 1px solid var(--border);
+      }
+
+      header img {
+        width: 36px;
+        height: 36px;
+        border-radius: 10px;
+      }
+
+      .brand {
+        display: flex;
+        flex-direction: column;
+        line-height: 1.2;
+        flex: 1;
+        min-width: 0;
+      }
+
+      .brand-title {
+        font-size: 14px;
+        font-weight: 700;
+        letter-spacing: 0.2px;
+      }
+
+      .brand-sub {
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+
+      .status {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 14px 4px;
+        font-size: 12px;
+      }
+
+      .dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: var(--accent-cyan);
+        flex-shrink: 0;
+      }
+
+      .dot.online {
+        background: var(--success);
+      }
+
+      .dot.offline {
+        background: var(--danger);
+      }
+
+      .status-text {
+        color: var(--text-muted);
+      }
+
+      .status-text strong {
+        color: var(--text);
+        font-weight: 600;
+      }
+
+      .total {
+        padding: 0 14px 12px;
+        font-size: 12px;
+        color: var(--text-muted);
+      }
+
+      .total strong {
+        color: var(--accent-cyan);
+        font-size: 15px;
+        font-weight: 700;
+      }
+
+      .section-title {
+        padding: 0 14px 8px;
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
+        color: var(--text-muted);
+      }
+
+      #categories {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding: 0 14px 12px;
+      }
+
+      .category {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 8px 10px;
+      }
+
+      .category.empty {
+        opacity: 0.55;
+      }
+
+      .category-icon {
+        flex-shrink: 0;
+        width: 26px;
+        height: 26px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 8px;
+        font-size: 13px;
+        background: var(--surface-alt);
+      }
+
+      .category-icon.images { color: #fbbf24; }
+      .category-icon.videos { color: var(--accent-cyan); }
+      .category-icon.audio { color: var(--success); }
+      .category-icon.compressed { color: #fb923c; }
+      .category-icon.documents { color: #60a5fa; }
+      .category-icon.other { color: var(--accent); }
+
+      .category-label {
+        flex: 1;
+        min-width: 0;
+        font-size: 12px;
+      }
+
+      .category-count {
+        font-size: 13px;
+        font-weight: 700;
+        min-width: 26px;
+        text-align: right;
+        color: var(--text);
+      }
+
+      .category-count.zero {
+        color: var(--text-muted);
+        font-weight: 500;
+      }
+
+      .category-btn {
+        flex-shrink: 0;
+        padding: 5px 10px;
+        border-radius: 8px;
+        font-size: 11px;
+        font-family: inherit;
+        font-weight: 600;
+        background: var(--accent);
+        border: 1px solid var(--accent);
+        color: #fff;
+        cursor: pointer;
+      }
+
+      .category-btn:hover {
+        background: #7c3aed;
+      }
+
+      .category-btn:disabled {
+        background: var(--surface-alt);
+        border-color: var(--border);
+        color: var(--text-muted);
+        cursor: default;
+      }
+
+      .error {
+        margin: 0 14px 12px;
+        padding: 10px 12px;
+        border: 1px solid rgba(248, 113, 113, 0.35);
+        background: rgba(248, 113, 113, 0.08);
+        color: var(--danger);
+        border-radius: 10px;
+        font-size: 12px;
+        line-height: 1.4;
+        display: none;
+      }
+
+      footer {
+        display: flex;
+        gap: 8px;
+        padding: 0 14px 14px;
+      }
+
+      button.wide {
+        flex: 1;
+        background: var(--surface-alt);
+        border: 1px solid var(--border);
+        color: var(--text);
+        border-radius: 10px;
+        padding: 9px 0;
+        font-size: 12px;
+        font-weight: 600;
+        font-family: inherit;
+        cursor: pointer;
+      }
+
+      button.wide:hover {
+        background: var(--border);
+      }
+
+      button.wide.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+      }
+
+      button.wide.primary:hover {
+        background: #7c3aed;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <img src="icons/logo-48.png" alt="MagnetoClip" />
+      <div class="brand">
+        <span class="brand-title">MagnetoClip Companion</span>
+        <span class="brand-sub">Detected files by category</span>
+      </div>
+    </header>
+
+    <div class="status">
+      <span class="dot" id="status-dot"></span>
+      <span class="status-text" id="status-text">Checking…</span>
+    </div>
+
+    <div class="total">
+      <strong id="total-count">0</strong> detected files waiting for MagnetoClip
+    </div>
+
+    <div class="section-title">Categories</div>
+    <div id="categories"></div>
+
+    <div class="error" id="error-box">
+      <span id="error-text"></span>
+    </div>
+
+    <footer>
+      <button class="wide primary" id="btn-all">Open detected files</button>
+      <button class="wide" id="btn-refresh">Refresh</button>
+    </footer>
+
+    <script src="compat.js"></script>
+    <script src="categories.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

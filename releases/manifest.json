@@ -1,0 +1,10 @@
+{
+    "version": "1.1.2",
+    "download_url": "https://github.com/Devallix/MagnetoClip-An-Internet-Download-Manager/raw/refs/heads/main/releases/MagnetoClip-1.1.1.zip",
+    "release_notes": "Version 1.1.1: fresh installs now detect and use the app's bundled ffmpeg, so the video resolution picker offers the full ladder (including high-resolution merged video+audio) and those downloads complete correctly without a system-wide ffmpeg; faster, smoother UI with instant page switching, single-query sidebar and overview counters, idle capture polling that skips unchanged-database queries, and a progress-bar animation clock that idles when nothing is animating; and in-app documentation table-of-contents links now jump to the correct section.",
+    "release_date": "2026-10-12",
+    "min_version": "0.1.0",
+    "size_bytes": 147125593,
+    "filename": "MagnetoClip-1.1.2.zip",
+    "sha256": "7b0b7eb5492d0a38e560d33caf47914e7dd946e2d0ce004de8bd76f8d768519d"
+}

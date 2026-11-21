@@ -1,0 +1,183 @@
+from __future__ import annotations
+
+import copy
+from pathlib import Path
+from typing import Any
+
+DEFAULTS: dict[str, Any] = {
+    # General
+    "general.startup": True,
+    "general.tray_behavior": "minimize_to_tray",
+    "general.confirm_removal": True,
+    # Downloads
+    "downloads.default_directory": str(Path.home() / "Downloads"),
+    "downloads.simultaneous": 3,
+    "downloads.connections_per_download": 16,
+    "downloads.inplace_downloads": True,
+    "downloads.auto_categorize": True,
+    # Streaming (embedded/online media via yt-dlp)
+    "streaming.quality": "best",
+    "streaming.browser_assist": True,
+    "streaming.page_sniff": True,
+    "streaming.ffmpeg_path": "",
+    "streaming.streaming_sites": [
+        "anikai.watch",
+        "anikai.vip",
+        "anikai.rip",
+        "anikai.to",
+        "animekai.org.lv",
+        "hdtoday24.at",
+        "hdtodayz.app",
+        "hdtoday.duckdns.org",
+        "hdtoday.to",
+        "4thdmovie.com",
+    ],
+    # YouTube quality flow
+    "youtube.default_quality": "ask",
+    "youtube.check_formats": False,
+    # Playlist (YouTube and other supported playlists)
+    "playlist.create_folder": True,
+    "playlist.max_items": 500,
+    "playlist.extract_limit": 200,
+    "playlist.play_while_downloading": False,
+    "playlist.default_selection": True,
+    # Torrent
+    "torrent.default_save_dir": "",
+    "torrent.listen_port": 6881,
+    "torrent.enable_dht": True,
+    "torrent.enable_pex": True,
+    "torrent.enable_encryption": True,
+    "torrent.max_upload_speed": 0,
+    "torrent.max_download_speed": 0,
+    "torrent.max_connections": 500,
+    "torrent.max_uploads": 4,
+    "torrent.connections_per_torrent": 0,
+    "torrent.default_sequential": False,
+    "torrent.auto_seed": False,
+    "torrent.max_active_torrents": 5,
+    "torrent.max_active_downloads": 3,
+    "torrent.disk_cache_mb": 256,
+    "torrent.hashing_threads": 4,
+    "torrent.max_out_request_queue": 1500,
+    "torrent.prefer_tcp": True,
+    "torrent.search_sites": ["yts"],
+    "torrent.file_association": True,
+    "torrent.magnet_protocol": True,
+    # Network
+    "network.user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "network.timeout_seconds": 30,
+    "network.retry_max": 5,
+    "network.proxy_profile": "direct",
+    "network.max_bandwidth_mbps": 0.0,
+    "network.default_proxy_id": 0,
+    "network.verify_tls": True,  # disable only for proxies/VPNs doing HTTPS inspection
+    # Browser
+    # Integration defaults ON: the extension is only ever loaded by an explicit
+    # user action, so shipping it dead-by-default just produces a silent,
+    # broken-looking bridge (captures rejected with "integration disabled").
+    "browser.integration_enabled": True,
+    "browser.capture_enabled": True,
+    "browser.default_downloader": False,
+    "browser.confirm_capture": True,
+    "browser.notify_downloadable": True,
+    "browser.skip_all_until": "",
+    # Appearance
+    "appearance.theme": "dark",
+    "appearance.accent": "#8B5CF6",
+    "appearance.density": "comfortable",
+    "appearance.animations": True,
+    # Advanced
+    "advanced.log_level": "info",
+    "advanced.experimental": False,
+    # Updates
+    "updates.check_enabled": True,
+    "updates.endpoint": "https://github.com/Devallix/MagnetoClip-An-Internet-Download-Manager/raw/refs/heads/main/releases/manifest.json",
+    "updates.last_checked": "",
+    "updates.last_version": "",
+    # Remote control (LAN dashboard)
+    "remote.enabled": False,
+    "remote.port": 8477,
+    "remote.token": "",  # generated via secrets.token_urlsafe on first enable
+    # Licensing (serial lives in the OS keychain, not here).
+    # Empty endpoint = licensing disabled (dev); release builds embed the
+    # production URL + public key here.
+    "license.endpoint": "https://magnetocliplicenseadmin.pythonanywhere.com/",
+    "license.public_key": "GoQTJxkad4rZkdqcU22fEAmaBKp7ml99lNguTcITCig=",  # Ed25519 pin; embedded constant used when empty
+    "license.last_validated": "",
+    "license.max_machines": 1,
+    "license.machines_used": 1,
+    # Trial period (first-launch grace before activation is required).
+    "trial.first_launch": "",   # ISO timestamp; set once on first launch
+    "trial.days": 7,            # number of free trial days
+    # Duplicate detection
+    "dedup.enabled": True,
+    "dedup.auto_skip": False,
+    "dedup.hash_algo": "xxh3_128",
+    "dedup.index_after_download": True,
+    "dedup.only_same_filename": True,
+    # Pause: simple manual pause switch with optional auto-resume timer
+    "pause.enabled": False,
+    "pause.auto_resume_hours": 0,  # 0 = stay paused until resumed manually
+    "pause.resume_at": "",          # ISO UTC timestamp when auto-resume fires
+    # Network speed monitor
+    "speedtest.enabled": True,
+    "speedtest.test_server": "",
+    "speedtest.test_size_mb": 25,
+    "speedtest.auto_test_enabled": False,
+    "speedtest.auto_test_interval_hours": 12,
+    "speedtest.throttle_sensitivity": 0.3,
+    # Built-in file preview
+    "preview.enabled": True,
+    "preview.video_player": "internal",
+    "preview.pdf_viewer": "internal",
+    # Webpage archiver
+    "archiver.enabled": True,
+    "archiver.inline_images": True,
+    "archiver.inline_css": True,
+    "archiver.inline_js": False,
+    "archiver.max_resource_size": 5,
+    "archiver.timeout": 30,
+    "archiver.add_metadata": True,
+}
+
+
+class Settings:
+    """Flat, key/value settings model with typed defaults.
+
+    Keys use dotted names (e.g. ``downloads.simultaneous``). Persistence is
+    delegated to a store that reads/writes the SQLite ``settings`` table.
+    """
+
+    def __init__(self, values: dict[str, Any] | None = None) -> None:
+        self._values: dict[str, Any] = dict(DEFAULTS)
+        if values:
+            self._values.update(
+                {k: v for k, v in values.items() if k in DEFAULTS}
+            )
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._values.get(key, default)
+
+    def set(self, key: str, value: Any) -> None:
+        if key in self._values:
+            self._values[key] = value
+
+    def merge(self, values: dict[str, Any] | None) -> None:
+        """Apply stored overrides in place, ignoring unknown keys."""
+        if values:
+            self._values.update(
+                {k: v for k, v in values.items() if k in DEFAULTS}
+            )
+
+    def keys(self) -> list[str]:
+        return list(self._values)
+
+    def as_dict(self) -> dict[str, Any]:
+        return copy.deepcopy(self._values)
+
+    def to_store_dict(self) -> dict[str, Any]:
+        return dict(self._values)
+
+    @classmethod
+    def from_store(cls, stored: dict[str, Any]) -> Settings:
+        return cls(stored)

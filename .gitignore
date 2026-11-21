@@ -1,0 +1,61 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.coverage.*
+
+# Application runtime data
+*.db
+*.sqlite3
+*.mclip
+*.part
+logs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ENVIROMENT VARIABLE
+env
+
+# LICENSE SERVER/LICENSE DATA
+license-server/
+license_data/
+
+#ignore this
+python_lessons.py
+
+#other
+build_tmp/
+scripts/
+sites_info/
+tests/
+docs/
+img/
+data/
+IMPLEMENTATION_NOTES.md
+LICENSE_PLAN.md
+MULTI_MACHINE_PLAN.md
+STREAMING_REWRITE_PLAN.md
+app_update_feature.md

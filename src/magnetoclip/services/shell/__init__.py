@@ -1,0 +1,1 @@
+"""OS-level shell integration (URL schemes, launch commands)."""

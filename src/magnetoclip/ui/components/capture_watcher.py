@@ -1,0 +1,566 @@
+"""Bridges browser captures into the Qt UI.
+
+The native-messaging host runs in a separate process and cannot show dialogs or
+tray notifications, so it persists ``pending_captures`` and ``browser_detections``
+rows. This watcher polls the shared database on the UI thread, presents a
+confirmation dialog for each capture, and raises a tray notification when the
+extension finds downloadable files on a page.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from urllib.parse import urlparse
+
+from PySide6.QtCore import QObject, QTimer
+
+from magnetoclip.browser.skip import skip_all_active
+from magnetoclip.core.events.bus import Events
+from magnetoclip.database.repositories import (
+    BrowserDetectionRepository,
+    BrowserRequestRepository,
+    PendingCaptureRepository,
+)
+from magnetoclip.network.content import ensure_extension
+from magnetoclip.services.logging import get_logger
+
+from ..dialogs.capture import (
+    RESULT_DOWNLOAD_NOW,
+    RESULT_SKIP,
+    RESULT_SKIP_ALL,
+    CaptureDialog,
+)
+from ..youtube_flow import youtube_quality_kwargs
+
+log = get_logger(__name__)
+
+POLL_INTERVAL_MS = 1200
+PLAYER_POLL_INTERVAL_MS = 250
+
+
+def _dominant_category(detection) -> str:
+    """Most common detection category on a page, for a category-aware toast.
+
+    Opening the toast lands directly on that filter; ``""`` (a genuine mix) opens
+    the unfiltered Detected page.
+    """
+    from ..categories import DETECTION_CATEGORIES, detection_category
+
+    counts: dict[str, int] = {}
+    for file in detection.files_json or []:
+        category = detection_category(
+            (file or {}).get("detected_type"), (file or {}).get("category")
+        )
+        counts[category] = counts.get(category, 0) + 1
+    if not counts:
+        return ""
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+        return ""
+    best = ranked[0][0]
+    return best if best in DETECTION_CATEGORIES and best != "other" else ""
+
+
+class CaptureWatcher(QObject):
+    """Periodically checks for pending browser captures and page detections."""
+
+    def __init__(self, context, parent=None, dialog_factory=None) -> None:
+        super().__init__(parent)
+        self.context = context
+        self._dialog_factory = dialog_factory or self._default_dialog
+        self._dialog_open = False
+        self._active_dialog = None
+        self._active_capture_id: int | None = None
+        self._download_fingerprint: dict[int, tuple[str, ...]] = {}
+        self._timer = QTimer(self)
+        self._timer.setInterval(POLL_INTERVAL_MS)
+        self._timer.timeout.connect(self.poll)
+        self._player_timer = QTimer(self)
+        self._player_timer.setInterval(PLAYER_POLL_INTERVAL_MS)
+        self._player_timer.timeout.connect(self._handle_player_downloads)
+        # Snapshot of the DB files, so idle polls can skip every query.
+        # Keep independent fingerprints for the general poller and the
+        # player-download timer. Sharing one stamp lets poll() consume a DB
+        # change first, causing _handle_player_downloads() to incorrectly skip
+        # the newly queued request on its next tick.
+        self._db_stamps: dict[str, tuple[tuple[int, int], ...] | None] = {
+            "poll": None,
+            "player": None,
+        }
+
+    def _db_unchanged(self, watcher: str = "poll") -> bool:
+        """True when no process has written to the shared DB since the last poll.
+
+        Polling runs on the GUI thread and every query opens a session; the
+        browser host can also write the DB at any time. When none of the
+        SQLite files (data, WAL, shared-memory) changed since last time, every
+        SELECT would return the previous result, so the poll is skipped entirely.
+        """
+        base = Path(self.context.database.path)
+        current = []
+        for suffix in ("", "-wal", "-shm"):
+            path = Path(f"{base}{suffix}")
+            try:
+                stat = path.stat()
+                current.append((stat.st_size, stat.st_mtime_ns))
+            except OSError:
+                current.append((0, 0))
+        stamp = tuple(current)
+        previous = self._db_stamps.get(watcher)
+        unchanged = stamp == previous
+        self._db_stamps[watcher] = stamp
+        return unchanged
+
+    def _default_dialog(self, capture) -> CaptureDialog:
+        return CaptureDialog(
+            self.context,
+            url=capture.url,
+            filename=capture.filename,
+            detected_type=capture.detected_type,
+            referrer=capture.referrer,
+            parent=self.parent(),
+        )
+
+    def _report_player_download_result(
+        self, payload: dict, state: str, message: str = "", download_id: int | None = None
+    ) -> None:
+        """Return the GUI's actual start result to the originating extension tab."""
+        detection_id = str(payload.get("detection_id") or "").strip()
+        if not detection_id:
+            return
+        result = {
+            "detection_id": detection_id,
+            "tab_id": payload.get("tab_id"),
+            "frame_id": payload.get("frame_id"),
+            "state": state,
+            "message": message,
+            "download_id": int(download_id or 0),
+        }
+        try:
+            with self.context.session_factory() as session:
+                BrowserRequestRepository(session).add(
+                    "player_download_result", payload=result
+                )
+        except Exception:
+            log.warning(
+                "player_download_result_queue_failed",
+                detection_id=detection_id,
+                state=state,
+                exc_info=True,
+            )
+
+    def start(self) -> None:
+        self._timer.start()
+        self._player_timer.start()
+
+    def stop(self) -> None:
+        self._timer.stop()
+        self._player_timer.stop()
+
+    def poll(self) -> int:
+        """Process detections and captures. Returns the number of items handled."""
+        if self._db_unchanged("poll"):
+            return 0
+        handled = 0
+        handled += self._handle_detections()
+        self._sync_downloads()
+        self._handle_navigation()
+        if self._dialog_open:
+            self._dismiss_superseded_capture_dialog()
+        else:
+            handled += self._handle_captures()
+        return handled
+
+    def _handle_navigation(self) -> int:
+        """Apply navigation the extension asked for through the host process.
+
+        The native host cannot touch this process's widgets or event bus, so an
+        "open the Detected page" request is persisted and claimed here. The claim
+        marks the row consumed, so a poll that raised no window (closing app,
+        headless tests) still does not replay the request forever.
+        """
+        with self.context.session_factory() as session:
+            from magnetoclip.database.repositories import BrowserRequestRepository
+
+            request = BrowserRequestRepository(session).next_queued(["navigate"])
+        if request is None:
+            return 0
+        payload = request.payload_json or {}
+        page = str(payload.get("page") or "")
+        if not page:
+            return 0
+        self.context.events.post(
+            Events.NAVIGATE, {"page": page, "category": payload.get("category") or ""}
+        )
+        return 1
+
+    def _sync_downloads(self) -> None:
+        """Mirror download rows written by the browser-host process into the GUI.
+
+        The native-messaging host runs in a separate process and only shares the
+        database, so the archive downloads it creates never emit events here.
+        Every poll we fingerprint the most recent downloads and re-emit local
+        events for rows that changed, so the Downloads page reflects host-side
+        archive jobs (progress -> completed) without waiting for a manual page
+        refresh. GUI-initiated downloads are already live via normal events, so
+        re-emitting for them is harmless deduplication.
+        """
+        from sqlalchemy import select
+
+        from magnetoclip.database.models import Download
+
+        with self.context.session_factory() as session:
+            rows = session.execute(
+                select(
+                    Download.id,
+                    Download.status,
+                    Download.filename,
+                    Download.detected_type,
+                    Download.size_total,
+                    Download.size_downloaded,
+                    Download.save_path,
+                    Download.completed_at,
+                    Download.error,
+                )
+                .order_by(Download.created_at.desc())
+                .limit(200)
+            ).all()
+        if not rows:
+            self._download_fingerprint = {}
+            return
+        seen: dict[int, tuple[str, ...]] = {}
+        for row in rows:
+            seen[int(row.id)] = tuple(
+                str(value) if value is not None else "" for value in row
+            )
+        if seen == self._download_fingerprint:
+            return
+        previous = self._download_fingerprint
+        self._download_fingerprint = seen
+        manager = getattr(self.context, "manager", None)
+        if manager is None:
+            return
+        for download_id, fingerprint in seen.items():
+            if previous.get(download_id) == fingerprint:
+                continue
+            download = manager.get_download(download_id)
+            if download is None:
+                continue
+            self.context.events.post(
+                (
+                    Events.DOWNLOAD_ADDED
+                    if download_id not in previous
+                    else Events.DOWNLOAD_UPDATED
+                ),
+                manager.snapshot_item(download),
+            )
+
+    # ----- player-button downloads -----------------------------------------
+
+    def _handle_player_downloads(self) -> int:
+        """Start a player stream in the GUI process using Detected-page logic."""
+        if self._db_unchanged("player"):
+            return 0
+        with self.context.session_factory() as session:
+            request = BrowserRequestRepository(session).next_queued(["player_download"])
+        if request is None:
+            return 0
+
+        payload = request.payload_json or {}
+        entry = payload.get("entry")
+        url = str(payload.get("url") or "").strip()
+        if not isinstance(entry, dict) or not url or not str(entry.get("url") or "").strip():
+            log.warning("player_download_request_invalid", request_id=request.id)
+            self._report_player_download_result(
+                payload, "error", "MagnetoClip could not resolve the captured stream. Try again."
+            )
+            return 1
+
+        entry = dict(entry)
+        entry["url"] = str(entry.get("url") or url).strip()
+        entry.setdefault("page_url", payload.get("page_url") or "")
+        log.info(
+            "player_download_claimed",
+            request_id=request.id,
+            request_created_at=str(getattr(request, "created_at", "") or ""),
+            url=url,
+        )
+
+        # Reuse the exact code path behind Detected -> Download. The registry
+        # builds the page lazily, so this also works when the user never opened
+        # the Detected page during the current session.
+        from ..pages.detected import DetectedPage
+
+        window = self.parent()
+        page = None
+        pages = getattr(window, "_pages", None)
+        if pages is not None:
+            page = pages.get("Detected")
+        if page is None:
+            page = DetectedPage(self.context)
+
+        try:
+            log.info(
+                "player_download_start_entry_begin",
+                request_id=request.id,
+                url=url,
+            )
+            download_id = page.start_entry_download(entry)
+        except Exception as exc:  # noqa: BLE001 - leave the detection available
+            log.warning(
+                "player_download_start_failed",
+                request_id=request.id,
+                url=url,
+                error=str(exc),
+                exc_info=True,
+            )
+            self.context.events.post(
+                Events.NOTIFICATION_REQUESTED,
+                {
+                    "kind": "error",
+                    "title": "Could not start download",
+                    "body": str(exc),
+                },
+            )
+            self._report_player_download_result(
+                payload, "error", f"Could not start this stream: {exc}"
+            )
+            return 1
+
+        if download_id is None:
+            log.info(
+                "player_download_start_cancelled",
+                request_id=request.id,
+                url=url,
+            )
+            self._report_player_download_result(
+                payload, "cancelled", "The stream download was cancelled before it started."
+            )
+            return 1
+
+        log.info(
+            "player_download_started_in_gui",
+            request_id=request.id,
+            download_id=download_id,
+            url=url,
+        )
+        self._report_player_download_result(
+            payload, "started", "Download started in MagnetoClip.", download_id
+        )
+        return 1
+
+    # ----- page detections (notifications) -----
+
+    def _handle_detections(self) -> int:
+        if not bool(self.context.settings.get("browser.notify_downloadable", True)):
+            return 0
+        with self.context.session_factory() as session:
+            repo = BrowserDetectionRepository(session)
+            detections = repo.unnotified()
+            if not detections:
+                return 0
+            for detection in detections:
+                repo.mark_notified(detection.id)
+        for detection in detections:
+            host = urlparse(detection.page_url).hostname or detection.page_url
+            category = _dominant_category(detection)
+            self.context.events.post(
+                Events.NOTIFICATION_REQUESTED,
+                {
+                    "kind": "info",
+                    "title": "Downloadable files detected",
+                    "body": f"{detection.count} file(s) available on {host}",
+                    "action": "detected",
+                    "category": category,
+                },
+            )
+        return len(detections)
+
+    # ----- pending captures (confirmation dialog) -----
+
+    def _handle_captures(self) -> int:
+        with self.context.session_factory() as session:
+            repo = PendingCaptureRepository(session)
+            repo.expire_stale()
+            pending = repo.pending()
+            if pending and skip_all_active(self.context):
+                repo.resolve_all("rejected")
+                pending = []
+        if not pending:
+            return 0
+        capture = pending[0]
+        log.info(
+            "capture_dialog_showing",
+            capture_id=capture.id,
+            url=capture.url,
+            filename=capture.filename,
+        )
+        self._dialog_open = True
+        # Raise the main window before showing the dialog so it isn't lost
+        # behind the browser when the user right-clicks to capture a file.
+        parent = self.parent()
+        if parent is not None:
+            try:
+                parent.show()
+                parent.raise_()
+                parent.activateWindow()
+            except Exception:  # noqa: BLE001 - window activation is best-effort
+                pass
+        try:
+            dialog = self._dialog_factory(capture)
+            self._active_dialog = dialog
+            self._active_capture_id = int(capture.id)
+            result = dialog.exec()
+            # The YouTube quality picker is part of the same capture workflow.
+            # Keep the watcher locked until it finishes so a newer capture does
+            # not open a second confirmation over the quality dialog.
+            self._active_dialog = None
+            self._apply_decision(capture, result, dialog)
+        except Exception:  # noqa: BLE001 - a failing dialog must not crash the UI
+            log.warning("capture_dialog_failed", capture_id=capture.id, exc_info=True)
+            self._resolve(capture.id, "expired")
+            return 0
+        finally:
+            self._dialog_open = False
+            self._active_dialog = None
+            self._active_capture_id = None
+        return 1
+
+    def _dismiss_superseded_capture_dialog(self) -> None:
+        capture_id = self._active_capture_id
+        dialog = self._active_dialog
+        if capture_id is None or dialog is None:
+            return
+        try:
+            with self.context.session_factory() as session:
+                capture = PendingCaptureRepository(session).get(capture_id)
+                still_pending = capture is not None and capture.status == "pending"
+        except Exception:  # noqa: BLE001 - leave the current dialog usable on DB errors
+            log.debug("capture_dialog_status_check_failed", capture_id=capture_id, exc_info=True)
+            return
+        if still_pending:
+            return
+        log.info("capture_dialog_closed_as_superseded", capture_id=capture_id)
+        try:
+            # QDialog.exec() runs a nested event loop, so the watcher timer can
+            # close this modal promptly when the native host supersedes it.
+            dialog.done(RESULT_SKIP)
+        except Exception:  # noqa: BLE001 - best-effort dismissal
+            try:
+                dialog.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _apply_decision(self, capture, result, dialog) -> None:
+        # A newer player-button request can expire this row while its modal
+        # confirmation is still open. Never let that stale dialog continue into
+        # the YouTube quality picker or create a download for the previous URL.
+        if not self._capture_is_pending(capture.id):
+            log.info("capture_dialog_superseded", capture_id=capture.id, url=capture.url)
+            return
+        if result == RESULT_SKIP_ALL:
+            self._park_all_pending_as_detections()
+            return
+        if result == RESULT_SKIP:
+            self._resolve(capture.id, "rejected")
+            return
+        quality_kwargs = youtube_quality_kwargs(
+            self.context,
+            capture.url,
+            cookies=capture.cookies_json,
+            parent=self.parent(),
+        )
+        if quality_kwargs is None:
+            self._resolve(capture.id, "rejected")
+            return
+        # A player click can supersede this request while the quality dialog is
+        # open. Revalidate before creating the download row, not only before
+        # entering the quality picker.
+        if not self._capture_is_pending(capture.id):
+            log.info("capture_quality_selection_superseded", capture_id=capture.id, url=capture.url)
+            return
+        try:
+            data = self._decode_data(getattr(capture, "data_base64", None))
+            download = self.context.manager.add(
+                capture.url,
+                filename=ensure_extension(dialog.filename(), None, data),
+                save_dir=dialog.directory(),
+                category_name=dialog.category(),
+                connections_max=dialog.connections(),
+                headers={
+                    **(capture.headers_json or {}),
+                    **({"Referer": capture.referrer} if capture.referrer else {}),
+                    **({"User-Agent": capture.user_agent} if getattr(capture, "user_agent", None) else {}),
+                }
+                or None,
+                cookies=capture.cookies_json,
+                data=data,
+                **quality_kwargs,
+            )
+        except Exception as exc:  # noqa: BLE001 - surface add failures as a rejection
+            log.warning("capture_add_failed", capture_id=capture.id, error=str(exc))
+            self._resolve(capture.id, "rejected")
+            return
+        self._resolve(capture.id, "approved", download_id=download.id)
+        if result == RESULT_DOWNLOAD_NOW and data is None:
+            self._start(download.id)
+
+    @staticmethod
+    def _decode_data(data_base64: str | None) -> bytes | None:
+        """Decode inline capture data; None when absent or corrupt."""
+        if not data_base64:
+            return None
+        try:
+            import base64
+
+            return base64.b64decode(data_base64, validate=True)
+        except Exception:  # noqa: BLE001 - corrupt data falls back to a normal add
+            return None
+
+    def _start(self, download_id: int) -> None:
+        try:
+            self.context.manager.start(download_id)
+        except RuntimeError:
+            # No event loop running (headless test); the download stays queued.
+            log.debug("capture_start_deferred", download_id=download_id)
+
+    def _capture_is_pending(self, capture_id: int) -> bool:
+        with self.context.session_factory() as session:
+            capture = PendingCaptureRepository(session).get(capture_id)
+            return capture is not None and capture.status == "pending"
+
+    def _resolve(self, capture_id: int, status: str, download_id: int | None = None) -> None:
+        with self.context.session_factory() as session:
+            PendingCaptureRepository(session).resolve(
+                capture_id, status, download_id=download_id
+            )
+
+    def _park_all_pending_as_detections(self) -> None:
+        """Move every queued capture to the Detection page.
+
+        "Skip all" does not arm the persistent skip flag anymore — arming it
+        also ticked the "Skip all detected files without asking" checkbox in
+        Settings, and silenced future captures the user did not ask to silence.
+        It just parks the already-detected files as page detections so they can
+        be reviewed or downloaded from the Detection page; future captures keep
+        popping the confirmation dialog.
+        """
+        with self.context.session_factory() as session:
+            repo = PendingCaptureRepository(session)
+            by_page: dict[str, list[dict]] = {}
+            for capture in repo.pending():
+                page = capture.referrer or capture.url
+                file: dict = {
+                    "url": capture.url,
+                    "filename": capture.filename or "",
+                    "detected_type": capture.detected_type or "file",
+                }
+                if capture.data_base64:
+                    file["data_base64"] = capture.data_base64
+                by_page.setdefault(page, []).append(file)
+            detection_repo = BrowserDetectionRepository(session)
+            for page, files in by_page.items():
+                detection_repo.add(
+                    page, count=len(files), files=files[:50], notified=True
+                )
+            repo.resolve_all("rejected")

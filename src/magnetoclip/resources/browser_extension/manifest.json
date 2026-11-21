@@ -1,0 +1,99 @@
+{
+  "manifest_version": 3,
+  "name": "MagnetoClip Companion",
+  "version": "1.10.17",
+  "description": "Detects downloadable media and files on web pages and sends them to the MagnetoClip desktop app.",
+  "permissions": [
+    "alarms",
+    "cookies",
+    "downloads",
+    "nativeMessaging",
+    "notifications",
+    "contextMenus",
+    "tabs",
+    "scripting",
+    "webNavigation",
+    "webRequest",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "scripts": [
+      "compat.js",
+      "categories.js",
+      "media_detection_core.js",
+      "queue.js",
+      "background.js"
+    ]
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "media_detection_core.js",
+        "media_probe_main.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": false,
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "player_click_bootstrap.js",
+        "media_probe_bootstrap.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": false
+    },
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "compat.js",
+        "categories.js",
+        "media_detection_core.js",
+        "content.js",
+        "player_overlay.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true,
+      "match_about_blank": false
+    }
+  ],
+  "action": {
+    "default_title": "MagnetoClip Companion",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/logo-16.png",
+      "32": "icons/logo-32.png",
+      "48": "icons/logo-48.png",
+      "128": "icons/logo-128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/logo-16.png",
+    "32": "icons/logo-32.png",
+    "48": "icons/logo-48.png",
+    "128": "icons/logo-128.png"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "magneto-companion@magnetoclip.app",
+      "strict_min_version": "142.0"
+    }
+  }
+}

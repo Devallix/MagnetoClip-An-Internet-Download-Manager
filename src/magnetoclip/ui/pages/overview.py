@@ -1,0 +1,313 @@
+"""Overview dashboard: headline stats and recent activity."""
+
+from __future__ import annotations
+
+import time
+from typing import Any
+
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import (
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QScrollArea,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
+
+from magnetoclip.core.events.bus import Events
+
+from ..components.download_card import DownloadCard
+from ..components.stat_card import StatCard
+from ..util import external_link_label, format_bytes, format_speed
+from .base import Page, make_scrollable
+
+TERMINAL = {"completed", "failed", "verification_failed", "stopped"}
+
+# Progress events can fire several times per second per download, but the
+# manager persists them to the DB at most once a second. Reading the DB again
+# inside that window returns the same snapshot, so recent-card refreshes are
+# throttled to roughly the DB cadence.
+_UI_PROGRESS_THROTTLE = 0.75
+
+_ACCENT = {
+    "active": "#3B82F6",
+    "completed": "#34D399",
+    "bytes": "#22D3EE",
+    "speed": "#8B5CF6",
+}
+
+
+class _ActionCard(QFrame):
+    """A small clickable card used for quick-action buttons."""
+
+    def __init__(self, title: str, hint: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("overview_action")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumHeight(64)
+        self.setMinimumWidth(160)
+        # Share the available row width with the other cards: narrow in a
+        # normal window, stretched when the window is maximized.
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(2)
+
+        t = QLabel(title)
+        t.setObjectName("overview_action_title")
+        t.setStyleSheet("font-size: 14px;")
+        t.setWordWrap(True)
+        h = QLabel(hint)
+        h.setObjectName("overview_action_hint")
+        h.setWordWrap(True)
+        layout.addWidget(t)
+        layout.addWidget(h)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton and hasattr(self, "_on_click"):
+            self._on_click()
+        super().mousePressEvent(event)
+
+
+class OverviewPage(Page):
+    def __init__(self, context, parent=None) -> None:
+        super().__init__(context, parent)
+
+        # Horizontal scrolling stays available for narrow windows, but the
+        # content is no longer forced wider than the viewport at startup.
+        layout = make_scrollable(self, spacing=20, horizontal=True)
+        container = layout.parentWidget()
+        if container is not None:
+            container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+
+        # ── page header ──────────────────────────────────────────────────────
+        header = QVBoxLayout()
+        title = QLabel("Overview")
+        title.setObjectName("page_title")
+        subtitle = QLabel("Your download activity at a glance")
+        subtitle.setObjectName("page_subtitle")
+        header.addWidget(title)
+        header.addWidget(subtitle)
+        layout.addLayout(header)
+
+        # ── hero stat cards (2×2) ───────────────────────────────────────────
+        grid = QGridLayout()
+        grid.setSpacing(12)
+
+        self.active_card = StatCard("Active downloads")
+        self.active_card.set_accent(_ACCENT["active"])
+        self.active_card.setMinimumHeight(100)
+
+        self.completed_card = StatCard("Completed")
+        self.completed_card.set_accent(_ACCENT["completed"])
+        self.completed_card.setMinimumHeight(100)
+
+        self.bytes_card = StatCard("Total downloaded")
+        self.bytes_card.set_accent(_ACCENT["bytes"])
+        self.bytes_card.setMinimumHeight(100)
+
+        self.speed_card = StatCard("Current speed")
+        self.speed_card.set_accent(_ACCENT["speed"])
+        self.speed_card.setMinimumHeight(100)
+
+        grid.addWidget(self.active_card, 0, 0)
+        grid.addWidget(self.completed_card, 0, 1)
+        grid.addWidget(self.bytes_card, 1, 0)
+        grid.addWidget(self.speed_card, 1, 1)
+        layout.addLayout(grid)
+
+        # ── indexed files stat (duplicate detection) ─────────────────────────
+        self.indexed_card = StatCard("Files indexed for duplicates")
+        self.indexed_card.set_accent("#F59E0B")
+        self.indexed_card.setMinimumHeight(72)
+        layout.addWidget(self.indexed_card)
+
+        # ── recent activity section card ─────────────────────────────────────
+        activity_frame = QFrame()
+        activity_frame.setObjectName("card")
+        activity_frame.setMaximumHeight(340)
+        activity_inner = QVBoxLayout(activity_frame)
+        activity_inner.setContentsMargins(16, 14, 16, 14)
+        activity_inner.setSpacing(8)
+
+        activity_title = QLabel("Recent Activity")
+        activity_title.setObjectName("card_title")
+        activity_inner.addWidget(activity_title)
+
+        self.recent_scroll = QScrollArea()
+        self.recent_scroll.setObjectName("recent_scroll")
+        self.recent_scroll.setFrameShape(QFrame.NoFrame)
+        self.recent_scroll.setWidgetResizable(True)
+        self.recent_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.recent_scroll.setFixedHeight(252)
+
+        self.recent_container = QWidget()
+        self.recent_container.setObjectName("recent_container")
+        self.recent_cards: dict[int, DownloadCard] = {}
+        self._last_progress: dict[int, float] = {}
+        # Whether events changed the stat cards since the last full refresh.
+        # The recent-activity list updates live either way.
+        self._dirty = True
+        self.recent_layout = QVBoxLayout(self.recent_container)
+        self.recent_layout.setContentsMargins(0, 0, 0, 0)
+        self.recent_layout.setSpacing(8)
+
+        self.empty_label = QLabel(
+            "No recent activity yet. Start a download to see it appear here."
+        )
+        self.empty_label.setObjectName("overview_empty")
+        self.empty_label.setAlignment(Qt.AlignCenter)
+        self.empty_label.setWordWrap(True)
+        self.recent_layout.addWidget(self.empty_label)
+        self.recent_layout.addStretch(1)
+
+        self.recent_scroll.setWidget(self.recent_container)
+        activity_inner.addWidget(self.recent_scroll)
+
+        layout.addWidget(activity_frame)
+
+        # ── quick actions ────────────────────────────────────────────────────
+        actions_label = QLabel("Quick Actions")
+        actions_label.setObjectName("card_title")
+        layout.addWidget(actions_label)
+
+        actions_row = QHBoxLayout()
+        actions_row.setSpacing(12)
+
+        new_download_card = _ActionCard(
+            "New Download", "Paste a URL to start downloading"
+        )
+        new_download_card._on_click = lambda: self._navigate("downloads")
+        actions_row.addWidget(new_download_card, 1)
+
+        view_analytics_card = _ActionCard(
+            "View Analytics", "See detailed download statistics"
+        )
+        view_analytics_card._on_click = lambda: self._navigate("analytics")
+        actions_row.addWidget(view_analytics_card, 1)
+
+        view_torrents_card = _ActionCard(
+            "Torrents", "Manage your torrent downloads"
+        )
+        view_torrents_card._on_click = lambda: self._navigate("torrents")
+        actions_row.addWidget(view_torrents_card, 1)
+
+        buy_license_card = QFrame()
+        buy_license_card.setObjectName("overview_action")
+        buy_license_card.setMinimumHeight(64)
+        buy_license_card.setMinimumWidth(160)
+        buy_license_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        buy_license_layout = QVBoxLayout(buy_license_card)
+        buy_license_layout.setContentsMargins(14, 10, 14, 10)
+        buy_license_layout.addWidget(
+            external_link_label(
+                "Buy License Keys- visit magnetoclip official website",
+                "https://magnetoclip.devallix.com/",
+            )
+        )
+        actions_row.addWidget(buy_license_card, 1)
+
+        layout.addLayout(actions_row)
+
+        events = context.events
+        events.connect(Events.DOWNLOAD_UPDATED, self._on_updated)
+        events.connect(Events.PROGRESS_UPDATED, self._on_progress)
+        events.connect(Events.SPEED_UPDATED, self._on_speed)
+
+        # refresh() re-reads aggregate stats for the stat cards; coalesce
+        # bursts of DOWNLOAD_UPDATED events instead of re-querying once per
+        # update. The recent-activity card still updates immediately.
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(400)
+        self._refresh_timer.timeout.connect(self.refresh)
+
+        self.refresh()
+
+    # ── navigation ───────────────────────────────────────────────────────────
+
+    def _navigate(self, page_key: str) -> None:
+        """Ask the main window to switch to *page_key*."""
+        window = self.window()
+        activate = getattr(window, "_activate_nav", None)
+        if activate is not None:
+            activate(page_key)
+
+    # ── event handlers ───────────────────────────────────────────────────────
+
+    def _on_updated(self, payload: Any) -> None:
+        if isinstance(payload, dict) and payload.get("id"):
+            self._upsert_recent(payload)
+        self._refresh_timer.start()
+
+    def _on_progress(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+        download_id = payload["id"]
+        now = time.monotonic()
+        if now - self._last_progress.get(download_id, 0.0) < _UI_PROGRESS_THROTTLE:
+            return
+        self._last_progress[download_id] = now
+        manager = getattr(self.context, "manager", None)
+        if manager is None:
+            return
+        download = manager.get_download(download_id)
+        if download is not None:
+            self._upsert_recent(manager.snapshot_item(download))
+        self.speed_card.set_value(format_speed(payload.get("speed")))
+
+    def _on_speed(self, payload: Any) -> None:
+        self.speed_card.set_value(format_speed(payload.get("speed")))
+
+    def needs_refresh(self) -> bool:
+        """True when stat cards changed since the last full refresh."""
+        return self._dirty
+
+    def _upsert_recent(self, snapshot: dict) -> None:
+        self._dirty = True
+        card = self.recent_cards.get(snapshot["id"])
+        if card is None:
+            card = DownloadCard()
+            self.recent_layout.insertWidget(0, card)
+            self.recent_cards[snapshot["id"]] = card
+        card.update_snapshot(snapshot)
+        while len(self.recent_cards) > 5:
+            oldest_id = next(iter(self.recent_cards))
+            oldest = self.recent_cards.pop(oldest_id)
+            self.recent_layout.removeWidget(oldest)
+            oldest.deleteLater()
+        self.recent_scroll.verticalScrollBar().setValue(0)
+        self.empty_label.setVisible(len(self.recent_cards) == 0)
+
+    def refresh(self) -> None:
+        manager = getattr(self.context, "manager", None)
+        if manager is None:
+            return
+        stats = manager.stats()
+        rows = stats["rows"]
+        active = sum(count for _status, _detected, count in rows if _status not in TERMINAL)
+        completed = sum(count for status, _detected, count in rows if status == "completed")
+        self.active_card.set_value(str(active))
+        self.completed_card.set_value(str(completed))
+        self.bytes_card.set_value(format_bytes(stats["completed_bytes"]))
+        self.empty_label.setVisible(len(self.recent_cards) == 0)
+        self._dirty = False
+        self._refresh_indexed_card()
+
+    def _refresh_indexed_card(self) -> None:
+        if not hasattr(self, "indexed_card"):
+            return
+        dedup = getattr(self.context, "dedup", None)
+        if dedup is None:
+            self.indexed_card.set_value("0")
+            return
+        try:
+            stats = dedup.stats()
+        except Exception:  # noqa: BLE001 - best-effort stats
+            self.indexed_card.set_value("0")
+            return
+        self.indexed_card.set_value(f"{stats.indexed_files} files")

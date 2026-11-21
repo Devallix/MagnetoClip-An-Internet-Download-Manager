@@ -1,0 +1,232 @@
+"""Capture confirmation dialog shown when the browser hands off a file."""
+
+from __future__ import annotations
+
+import os
+from urllib.parse import urlsplit
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QComboBox,
+    QDialog,
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QSpinBox,
+    QVBoxLayout,
+)
+
+from magnetoclip.media.streaming import is_audio_platform, is_streaming_url
+
+from ..components.buttons import AccentButton, GhostButton
+
+RESULT_DOWNLOAD_NOW = 1
+RESULT_DOWNLOAD_LATER = 2
+RESULT_SKIP = 0
+RESULT_SKIP_ALL = 3
+
+_MAX_URL_LENGTH = 120
+
+
+def truncate_url(url: str, max_length: int = _MAX_URL_LENGTH) -> str:
+    """Shorten a URL for display, keeping its head and tail readable."""
+    if len(url) <= max_length:
+        return url
+    head = url[: max_length // 2]
+    tail = url[-(max_length // 2) :]
+    return f"{head}\u2026{tail}"
+
+
+def default_capture_name(url: str, detected_type: str | None = None) -> str:
+    """Derive a default filename from a URL for the capture dialog.
+
+    Telegram Web proxy links (``/a/progressive/document…``) carry a session
+    token instead of a filename, so fall back to the last path segment and, when
+    it lacks an extension, guess one from the detected content type.
+    """
+    try:
+        path = urlsplit(url).path
+    except ValueError:
+        path = ""
+    base = os.path.basename(path.rstrip("/")).strip()
+    if "." in base:
+        return base
+    extension = {
+        "image": ".jpg",
+        "audio": ".m4a",
+        "video": ".mp4",
+        "document": ".bin",
+    }.get(detected_type or "", "")
+    return f"{base}{extension}" if base else ""
+
+
+class CaptureDialog(QDialog):
+    """Presents the captured file's download information ready to download.
+
+    The user can download immediately, add it to the queue, or skip it.
+    """
+
+    def __init__(
+        self,
+        context,
+        *,
+        url: str,
+        filename: str | None = None,
+        detected_type: str | None = None,
+        referrer: str | None = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.context = context
+        self.setWindowTitle("Download with MagnetoClip")
+        self.setFixedSize(520, 520)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        title = QLabel("Downloadable file detected")
+        title.setObjectName("page_title")
+        layout.addWidget(title)
+
+        hint = QLabel("Confirm the details below and start downloading.")
+        hint.setObjectName("page_subtitle")
+        layout.addWidget(hint)
+
+        info = QFrame()
+        info.setObjectName("card")
+        info_layout = QVBoxLayout(info)
+        info_layout.setContentsMargins(12, 10, 12, 10)
+        info_layout.setSpacing(4)
+
+        url_label = QLabel(truncate_url(url))
+        url_label.setObjectName("card_caption")
+        url_label.setToolTip(url)
+        url_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        url_label.setWordWrap(True)
+        info_layout.addWidget(url_label)
+
+        if detected_type:
+            type_label = QLabel(f"Detected type: {detected_type}")
+            type_label.setObjectName("card_caption")
+            info_layout.addWidget(type_label)
+        layout.addWidget(info)
+
+        layout.addWidget(QLabel("Filename"))
+        self.filename_edit = QLineEdit()
+        if not (filename or "").strip():
+            filename = default_capture_name(url, detected_type)
+        self.filename_edit.setText(filename or "")
+        self.filename_edit.setPlaceholderText("Keep the server-provided name")
+        layout.addWidget(self.filename_edit)
+
+        layout.addWidget(QLabel("Save to"))
+        directory_row = QHBoxLayout()
+        self.directory_edit = QLineEdit()
+        self.directory_edit.setPlaceholderText("Default download folder")
+        self.browse_button = QPushButton("Browse…")
+        self.browse_button.clicked.connect(self._browse)
+        directory_row.addWidget(self.directory_edit, 1)
+        directory_row.addWidget(self.browse_button)
+        layout.addLayout(directory_row)
+
+        options_row = QHBoxLayout()
+        options_row.setSpacing(16)
+
+        layout.addWidget(QLabel("Category"))
+        self.category_combo = QComboBox()
+        for category in getattr(getattr(context, "categories", None), "list", lambda: [])():
+            self.category_combo.addItem(category.name)
+        if self.category_combo.count() == 0:
+            self.category_combo.addItem("Other")
+        self._preselect_category(url, filename, detected_type)
+        layout.addWidget(self.category_combo)
+
+        connections_row = QHBoxLayout()
+        connections_row.addWidget(QLabel("Connections"))
+        self.connections_spin = QSpinBox()
+        self.connections_spin.setRange(1, 64)
+        self.connections_spin.setValue(
+            int(context.settings.get("downloads.connections_per_download", 16))
+        )
+        connections_row.addWidget(self.connections_spin)
+        connections_row.addStretch(1)
+        layout.addLayout(connections_row)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+        self.skip_button = GhostButton("Skip")
+        self.skip_button.clicked.connect(lambda: self.done(RESULT_SKIP))
+        buttons.addWidget(self.skip_button)
+        self.skip_all_button = GhostButton("Skip all")
+        self.skip_all_button.setToolTip(
+            "Move all currently detected files to the Detection page; "
+            "future files still ask for confirmation"
+        )
+        self.skip_all_button.clicked.connect(lambda: self.done(RESULT_SKIP_ALL))
+        buttons.addWidget(self.skip_all_button)
+        buttons.addStretch(1)
+        self.later_button = GhostButton("Download later")
+        self.later_button.clicked.connect(self._download_later)
+        self.download_button = AccentButton("Download now")
+        self.download_button.clicked.connect(self._download_now)
+        buttons.addWidget(self.later_button)
+        buttons.addWidget(self.download_button)
+        layout.addLayout(buttons)
+
+        self.filename_edit.setFocus()
+
+    def _preselect_category(
+        self, url: str, filename: str | None, detected_type: str | None
+    ) -> None:
+        """Auto-select a category so captures don't default to Documents."""
+        categories = getattr(self.context, "categories", None)
+        if categories is None or not hasattr(categories, "classify"):
+            return
+        name: str | None = None
+        if is_streaming_url(url):
+            name = "Music" if is_audio_platform(url) else "Videos"
+        elif detected_type in ("image", "audio", "video"):
+            name = {
+                "image": "Images",
+                "audio": "Music",
+                "video": "Videos",
+            }.get(detected_type)
+        if name is None:
+            candidate = categories.classify(filename=filename or "", url=url)
+            name = candidate.name if candidate else None
+        if name:
+            index = self.category_combo.findText(name)
+            if index >= 0:
+                self.category_combo.setCurrentIndex(index)
+
+    def _download_now(self) -> None:
+        if self._validate():
+            self.done(RESULT_DOWNLOAD_NOW)
+
+    def _download_later(self) -> None:
+        if self._validate():
+            self.done(RESULT_DOWNLOAD_LATER)
+
+    def _validate(self) -> bool:
+        # An empty filename is allowed: the app keeps the server-provided name.
+        return True
+
+    def _browse(self) -> None:
+        directory = QFileDialog.getExistingDirectory(self, "Choose destination folder")
+        if directory:
+            self.directory_edit.setText(directory)
+
+    def filename(self) -> str:
+        return self.filename_edit.text().strip() or None
+
+    def directory(self) -> str:
+        return self.directory_edit.text().strip() or None
+
+    def category(self) -> str | None:
+        return self.category_combo.currentText()
+
+    def connections(self) -> int | None:
+        return self.connections_spin.value()
